@@ -1,11 +1,16 @@
 from colorama import Fore
 from datetime import datetime
+from letslog import ErrorLogger
 import requests
 import argparse
 import concurrent.futures
 import urllib3
+import logging
 
 urllib3.disable_warnings()
+
+loggings = logging.basicConfig(level=logging.INFO)
+
 
 parser = argparse.ArgumentParser(description='Heapdump scanner')
 parser.add_argument('--url', help='URL to scan')
@@ -106,15 +111,19 @@ def save_result(domain: str, endpoint: str):
         f.write(f"{domain} - {endpoint}\n")
 
 def file_scanner(domain: str) -> bool:
+    logger = ErrorLogger().error_logger()
     try:
         success, endpoint = scanner(domain)
         if success:
-            print(f"{Fore.GREEN}[+] {Fore.WHITE}{domain} - {Fore.CYAN}{endpoint}{Fore.RESET}")
+            logging.info(f"{Fore.GREEN}[+] {Fore.WHITE}{domain} - {Fore.CYAN}{endpoint}{Fore.RESET}")
+            #print(f"{Fore.GREEN}[+] {Fore.WHITE}{domain} - {Fore.CYAN}{endpoint}{Fore.RESET}")
             save_result(domain, endpoint)
         else:
-            print(f"{Fore.RED}[-] {Fore.WHITE}{domain}{Fore.RESET}")
+            logging.info(f"{Fore.RED}[-] {Fore.WHITE}{domain}{Fore.RESET}")        
+            #print(f"{Fore.RED}[-] {Fore.WHITE}{domain}{Fore.RESET}")
     except Exception as e:
-        print(f"{Fore.RED}[-] {Fore.WHITE}{domain}{Fore.RESET}")
+        logging.error(f"{Fore.RED}[-] {Fore.WHITE}{domain}{Fore.RESET}")
+        logger.exception(f"{Fore.RED}[-] {Fore.WHITE}{domain}{Fore.RESET}\n")
 
 if __name__ == "__main__":
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
