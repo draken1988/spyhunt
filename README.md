@@ -345,7 +345,7 @@ Heap Dump Analysis
 ```
 python3 spyhunt.py --heapdump heapdump_file
 ```
-Spring Boot Actuator Scan
+Sprint Boot Actuator Scan
 ```
 python3 spyhunt.py --heapds domains.txt
 ```
