@@ -1,6 +1,5 @@
 from colorama import Fore, init, Style
 from os import path
-from builtwith import builtwith
 from modules.favicon import *
 from bs4 import BeautifulSoup
 from multiprocessing.pool import ThreadPool
@@ -53,6 +52,8 @@ import urllib
 import nmap3
 import ssl
 import shutil
+import dns.zone
+import dns.query
 
 
 warnings.filterwarnings(action='ignore',module='bs4')
@@ -71,7 +72,7 @@ banner = f"""
 ░ ░▒  ░ ░░▒ ░     ▓██ ░▒░  ▒ ░▒░ ░░░▒░ ░ ░ ░ ░░   ░ ▒░    ░    
 ░  ░  ░  ░░       ▒ ▒ ░░   ░  ░░ ░ ░░░ ░ ░    ░   ░ ░   ░      
       ░           ░ ░      ░  ░  ░   ░              ░         
-{Fore.WHITE}V 2.9
+{Fore.WHITE}V 3.0
 {Fore.WHITE}By c0deninja
 {Fore.RESET}
 """
@@ -117,10 +118,6 @@ parser.add_argument('-th', '--threads',
 
 passiverecon_group.add_argument('-s',
                     type=str, help='scan for subdomains',
-                    metavar='domain.com')
-
-passiverecon_group.add_argument('-t', '--tech',
-                    type=str, help='find technologies',
                     metavar='domain.com')
 
 passiverecon_group.add_argument('-d', '--dns',
@@ -315,9 +312,14 @@ vuln_group.add_argument('-jwt-modify', '--jwt_modify',
                      type=str, help='modify JWT token',
                      metavar='token')
 
-vuln_group.add_argument('-heapds', '--heapdump_scan',
-                     type=str, help='scan for heapdump endpoints',
+vuln_group.add_argument('-heapds', '--heapdump_file',
+                     type=str, help='file for heapdump scan',
+                     metavar='heapdump.txt')
+
+vuln_group.add_argument('-heapts', '--heapdump_target',
+                     type=str, help='target for heapdump scan',
                      metavar='domain.com')
+
 
 
 parser.add_argument('--s3-scan', help='Scan for exposed S3 buckets')
@@ -345,6 +347,20 @@ parser.add_argument('--proxy-file', help='Load proxies from file')
 parser.add_argument('--heapdump', help='Analyze Java heapdump file')
 
 parser.add_argument('--output-dir', help='Output directory', default='.')
+
+# Add after existing argument groups
+cloud_group = parser.add_argument_group('Cloud Security')
+cloud_group.add_argument('-aws', '--aws-scan',
+                    type=str, help='Scan for exposed AWS resources',
+                    metavar='domain.com')
+cloud_group.add_argument('-az', '--azure-scan',
+                    type=str, help='Scan for exposed Azure resources',
+                    metavar='domain.com')
+
+# Add to argument groups
+vuln_group.add_argument('-zt', '--zone-transfer', 
+                    type=str, help='Test for DNS zone transfer vulnerability',
+                    metavar='domain.com')
 
 
 
@@ -1011,16 +1027,6 @@ if args.brokenlinks:
     else:
         commands(f"blc -r --filter-level 2 {args.brokenlinks}")
 
-if args.tech:
-    try:
-        print("\n")
-        print (Fore.CYAN + "Scanning..." + "\n")
-        info = builtwith(f"{args.tech}")
-        for framework, tech in info.items():
-            print (Fore.GREEN + framework, ":", tech)
-    except UnicodeDecodeError:
-        pass
-
 if args.smuggler:
     smug_path = os.path.abspath(os.getcwd())
     commands(f"python3 {smug_path}/tools/smuggler/smuggler.py -u {args.smuggler} -q")
@@ -1290,7 +1296,8 @@ if args.forbiddenpass:
         except FileNotFoundError as e:
             print(f"File not found: {e}")
 
-    wordlist = word_list("payloads/bypasses.txt")
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    wordlist = word_list(os.path.join(current_dir, "payloads", "bypasses.txt"))
 
     def header_bypass():
         headers = [
@@ -2714,16 +2721,6 @@ if args.autorecon:
         dnsscan = scan(f"echo {target} | dnsx -silent -recon -j dnsscan.json")
         return dnsscan
     
-    async def techdetect(target):
-        tech = {}
-        try:
-            info = builtwith(f"{target}")
-            for framework, tech in info.items():
-                tech.append(f"{framework}: {tech}")
-        except UnicodeDecodeError:
-            pass
-        return tech
-    
     async def ssl_vuln_scan(target):
         TLS_VERSION = []
         TLS_VULN_VERSION = ["TLSv1.0", "TLSv1.1", "SSLv2", "SSLv3"]
@@ -2855,7 +2852,7 @@ if args.autorecon:
         print(f"{Fore.MAGENTA}Running autorecon for {Fore.CYAN}{target}{Style.RESET_ALL}\n")
         shodankey = input(f"{Fore.CYAN}Enter your Shodan API key: {Style.RESET_ALL}")
         print("\n")
-        with alive_bar(12, title='Running autorecon') as bar:
+        with alive_bar(11, title='Running autorecon') as bar:
             site_links = await crawl_site(target)
             print(f"{Fore.MAGENTA}Found {Fore.CYAN}{len(site_links)}{Style.RESET_ALL} links from crawling.")
             with open('site_links.txt', 'w') as f:
@@ -2921,14 +2918,6 @@ if args.autorecon:
                 f.write(f"{dns_output}\n")
             bar()  # Update after dnsscan
 
-            #Techdetect
-            tech = await techdetect(target)
-            print(f"{Fore.MAGENTA}Tech Detect: {Fore.CYAN}{tech}{Style.RESET_ALL}")
-            with open('techdetect.txt', 'w') as f:
-                for techs in tech:
-                    f.write(f"{techs}\n")
-            bar()  # Update after techdetect
-
             parameters = extract_parameters(all_links)
             links_params = set()
             for links in parameters:
@@ -2985,5 +2974,227 @@ if args.heapdump:
     analyzer = HeapdumpAnalyzer()
     analyzer.analyze(args.heapdump, args.output_dir)
 
-if args.heapdump_scan:
-    commands(f"python3 modules/heapdump_scan.py --file {args.heapdump_scan}")
+if args.heapdump_file:
+    commands(f"python3 modules/heapdump_scan.py --file {args.heapdump_file}")
+
+if args.heapdump_target:
+    commands(f"python3 modules/heapdump_scan.py --url {args.heapdump_target} --timeout 10")
+
+if args.aws_scan:
+    init(autoreset=True)
+    
+    def check_aws_services(domain):
+        aws_endpoints = {
+            'S3': [f'http://{domain}.s3.amazonaws.com', f'https://{domain}.s3.amazonaws.com'],
+            'CloudFront': [f'https://{domain}.cloudfront.net'],
+            'ELB': [f'{domain}.elb.amazonaws.com', f'{domain}.elb.us-east-1.amazonaws.com'],
+            'API Gateway': [f'https://{domain}.execute-api.us-east-1.amazonaws.com'],
+            'Lambda': [f'https://{domain}.lambda-url.us-east-1.amazonaws.com'],
+            'ECR': [f'https://{domain}.dkr.ecr.us-east-1.amazonaws.com'],
+            'ECS': [f'https://{domain}.ecs.us-east-1.amazonaws.com'],
+        }
+        
+        findings = []
+        with alive_bar(len(aws_endpoints), title='Scanning AWS Services') as bar:
+            for service, urls in aws_endpoints.items():
+                for url in urls:
+                    try:
+                        response = requests.get(url, timeout=10, verify=False)
+                        if response.status_code != 404:
+                            findings.append({
+                                'service': service,
+                                'url': url,
+                                'status': response.status_code,
+                                'headers': dict(response.headers)
+                            })
+                    except requests.RequestException:
+                        pass
+                bar()
+        return findings
+
+    def check_iam_exposure(domain):
+        iam_endpoints = [
+            f'https://iam.{domain}',
+            f'https://sts.{domain}',
+            f'https://signin.{domain}'
+        ]
+        findings = []
+        
+        print(f"\n{Fore.CYAN}Checking for exposed IAM endpoints...{Style.RESET_ALL}")
+        for endpoint in iam_endpoints:
+            try:
+                response = requests.get(endpoint, timeout=5, verify=False)
+                if response.status_code != 404:
+                    findings.append({
+                        'endpoint': endpoint,
+                        'status': response.status_code
+                    })
+            except requests.RequestException:
+                continue
+        return findings
+
+    target = args.aws_scan
+    print(f"\n{Fore.MAGENTA}Starting AWS Security Scan for {Fore.CYAN}{target}{Style.RESET_ALL}")
+    
+    # Scan AWS services
+    aws_findings = check_aws_services(target)
+    if aws_findings:
+        print(f"\n{Fore.RED}Found exposed AWS services:{Style.RESET_ALL}")
+        for finding in aws_findings:
+            print(f"\nService: {Fore.YELLOW}{finding['service']}{Style.RESET_ALL}")
+            print(f"URL: {Fore.CYAN}{finding['url']}{Style.RESET_ALL}")
+            print(f"Status: {finding['status']}")
+            
+    # Check IAM exposure
+    iam_findings = check_iam_exposure(target)
+    if iam_findings:
+        print(f"\n{Fore.RED}Found exposed IAM endpoints:{Style.RESET_ALL}")
+        for finding in iam_findings:
+            print(f"Endpoint: {Fore.CYAN}{finding['endpoint']}{Style.RESET_ALL}")
+            print(f"Status: {finding['status']}")
+            
+    # Save results
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    with open(f'aws_scan_{timestamp}.json', 'w') as f:
+        json.dump({
+            'aws_services': aws_findings,
+            'iam_endpoints': iam_findings
+        }, f, indent=4)
+    print(f"\n{Fore.GREEN}Results saved to aws_scan_{timestamp}.json{Style.RESET_ALL}")
+
+if args.azure_scan:
+    init(autoreset=True)
+    
+    def check_azure_services(domain):
+        azure_endpoints = {
+            'Storage': [f'https://{domain}.blob.core.windows.net',
+                       f'https://{domain}.file.core.windows.net',
+                       f'https://{domain}.queue.core.windows.net'],
+            'WebApps': [f'https://{domain}.azurewebsites.net'],
+            'Functions': [f'https://{domain}.azurewebsites.net/api'],
+            'KeyVault': [f'https://{domain}.vault.azure.net'],
+            'Database': [f'https://{domain}.database.windows.net'],
+            'ServiceBus': [f'https://{domain}.servicebus.windows.net']
+        }
+        
+        findings = []
+        with alive_bar(len(azure_endpoints), title='Scanning Azure Services') as bar:
+            for service, urls in azure_endpoints.items():
+                for url in urls:
+                    try:
+                        response = requests.get(url, timeout=10, verify=False)
+                        if response.status_code != 404:
+                            findings.append({
+                                'service': service,
+                                'url': url,
+                                'status': response.status_code,
+                                'headers': dict(response.headers)
+                            })
+                    except requests.RequestException:
+                        pass
+                bar()
+        return findings
+
+    def check_management_endpoints(domain):
+        mgmt_endpoints = [
+            f'https://management.{domain}',
+            f'https://portal.{domain}',
+            f'https://scm.{domain}'
+        ]
+        findings = []
+        
+        print(f"\n{Fore.CYAN}Checking for exposed management endpoints...{Style.RESET_ALL}")
+        for endpoint in mgmt_endpoints:
+            try:
+                response = requests.get(endpoint, timeout=5, verify=False)
+                if response.status_code != 404:
+                    findings.append({
+                        'endpoint': endpoint,
+                        'status': response.status_code
+                    })
+            except requests.RequestException:
+                continue
+        return findings
+
+    target = args.azure_scan
+    print(f"\n{Fore.MAGENTA}Starting Azure Security Scan for {Fore.CYAN}{target}{Style.RESET_ALL}")
+    
+    # Scan Azure services
+    azure_findings = check_azure_services(target)
+    if azure_findings:
+        print(f"\n{Fore.RED}Found exposed Azure services:{Style.RESET_ALL}")
+        for finding in azure_findings:
+            print(f"\nService: {Fore.YELLOW}{finding['service']}{Style.RESET_ALL}")
+            print(f"URL: {Fore.CYAN}{finding['url']}{Style.RESET_ALL}")
+            print(f"Status: {finding['status']}")
+            
+    # Check management endpoints
+    mgmt_findings = check_management_endpoints(target)
+    if mgmt_findings:
+        print(f"\n{Fore.RED}Found exposed management endpoints:{Style.RESET_ALL}")
+        for finding in mgmt_findings:
+            print(f"Endpoint: {Fore.CYAN}{finding['endpoint']}{Style.RESET_ALL}")
+            print(f"Status: {finding['status']}")
+            
+    # Save results
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    with open(f'azure_scan_{timestamp}.json', 'w') as f:
+        json.dump({
+            'azure_services': azure_findings,
+            'management_endpoints': mgmt_findings
+        }, f, indent=4)
+    print(f"\n{Fore.GREEN}Results saved to azure_scan_{timestamp}.json{Style.RESET_ALL}")
+
+# Add implementation
+if args.zone_transfer:
+    print(f"{Fore.MAGENTA}Testing DNS Zone Transfer for {Fore.CYAN}{args.zone_transfer}{Style.RESET_ALL}\n")
+    
+    def get_nameservers(domain):
+        try:
+            answers = dns.resolver.resolve(domain, 'NS')
+            return [str(rdata.target).rstrip('.') for rdata in answers]
+        except Exception as e:
+            print(f"{Fore.RED}Error getting nameservers: {e}{Style.RESET_ALL}")
+            return []
+
+    def test_zone_transfer(domain, nameserver):
+        try:
+            # Attempt zone transfer
+            z = dns.zone.from_xfr(dns.query.xfr(nameserver, domain))
+            names = z.nodes.keys()
+            records = []
+            
+            # Get all records
+            for n in names:
+                record = z[n].to_text(n)
+                records.append(record)
+                print(f"{Fore.GREEN}[+] {Fore.CYAN}{record}{Style.RESET_ALL}")
+            
+            # Save results if vulnerable
+            if records:
+                timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                with open(f'zone_transfer_{domain}_{timestamp}.txt', 'w') as f:
+                    f.write(f"DNS Zone Transfer Results for {domain}\n")
+                    f.write(f"Nameserver: {nameserver}\n\n")
+                    for record in records:
+                        f.write(f"{record}\n")
+                print(f"\n{Fore.RED}[!] Zone Transfer VULNERABLE!{Style.RESET_ALL}")
+                print(f"{Fore.GREEN}Results saved to zone_transfer_{domain}_{timestamp}.txt{Style.RESET_ALL}")
+            
+        except Exception as e:
+            print(f"{Fore.YELLOW}[-] Zone transfer failed for {nameserver}: {e}{Style.RESET_ALL}")
+
+    domain = args.zone_transfer
+    nameservers = get_nameservers(domain)
+    
+    if nameservers:
+        print(f"{Fore.MAGENTA}Found nameservers:{Style.RESET_ALL}")
+        for ns in nameservers:
+            print(f"{Fore.CYAN}[*] {ns}{Style.RESET_ALL}")
+        
+        print(f"\n{Fore.MAGENTA}Testing zone transfer on each nameserver...{Style.RESET_ALL}\n")
+        for ns in nameservers:
+            print(f"{Fore.CYAN}Testing {ns}...{Style.RESET_ALL}")
+            test_zone_transfer(domain, ns)
+    else:
+        print(f"{Fore.RED}No nameservers found for {domain}{Style.RESET_ALL}")

@@ -347,5 +347,17 @@ python3 spyhunt.py --heapdump heapdump_file
 ```
 Sprint Boot Actuator Scan
 ```
-python3 spyhunt.py --heapds domains.txt
+python3 spyhunt.py --heapdump_target domain.com
+```
+Heap Dump Scan with file
+```
+python3 spyhunt.py --heapdump_file heapdump.txt
+```
+Cloud Aws Scan
+```
+python3 spyhunt.py --aws_scan domain.com
+```
+Cloud Azure Scan
+```
+python3 spyhunt.py --azure_scan domain.com
 ```
