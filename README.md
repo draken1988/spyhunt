@@ -1,4 +1,3 @@
-
 # DESCRIPTION
 
 ![Spyhunt](https://github.com/gotr00t0day/spyhunt/blob/main/spyhunt_logo_cropped.png)
@@ -71,31 +70,40 @@ sudo python3 install.py
 
 ```
 
-# DEMO
-
-[![asciicast](https://asciinema.org/a/bCVk2NRnb5TJ7aVLV5ZIcnVa3.png)](https://asciinema.org/a/bCVk2NRnb5TJ7aVLV5ZIcnVa3)
-
 # USAGE 
 
 ```
 
 usage: spyhunt.py [-h] [-sv filename.txt | -wl filename.txt] [-th 25] [-s domain.com]
-                  [-t domain.com] [-d domains.txt] [-p domains.txt] [-r domains.txt]
-                  [-b domains.txt] [-pspider domain.com] [-w https://domain.com]
-                  [-j domain.com] [-wc https://domain.com] [-fi https://domain.com]
-                  [-fm https://domain.com] [-na https://domain.com] [-ri IP] [-rim IP]
-                  [-sc domain.com] [-ph domain.txt] [-co domains.txt] [-hh domain.com]
-                  [-sh domain.com] [-ed domain.com] [-smu domain.com] [-ips domain list]
-                  [-dinfo domain list] [-isubs domain list] [-nft domains.txt]
-                  [-n domain.com or IP] [-api domain.com] [-sho domain.com] [-fp domain.com]
-                  [-db domain.com] [-cidr IP/24] [-ps 80,443,8443] [-pai IP/24]
+                  [-d domains.txt] [-p domains.txt] [-r domains.txt] [-b domains.txt]
+                  [-pspider domain.com] [-w https://domain.com] [-j domain.com]
+                  [-wc https://domain.com] [-fi https://domain.com] [-fm https://domain.com]
+                  [-na https://domain.com] [-ri IP] [-rim IP] [-sc domain.com]
+                  [-ph domain.txt] [-co domains.txt] [-hh domain.com] [-sh domain.com]
+                  [-ed domain.com] [-smu domain.com] [-ips domain list] [-dinfo domain list]
+                  [-isubs domain list] [-nft domains.txt] [-n domain.com or IP]
+                  [-api domain.com] [-sho domain.com] [-fp domain.com] [-db domain.com]
+                  [-cidr IP/24] [-ps 80,443,8443] [-pai IP/24]
                   [-xss https://example.com/page?param=value]
                   [-sqli https://example.com/page?param=value] [-shodan KEY]
-                  [-webserver domain.com] [-javascript domain.com] [-dp 10] [-je file.txt]
+                  [-webserver domain.com] [-javascript domain.com] [-dp DEPTH] [-je file.txt]
                   [-hibp password] [-pm domain.com] [-ch domain.com] [-or domain.com]
                   [-asn AS55555] [-st subdomains.txt] [-ar domain.com] [-jwt token]
-                  [-jwt-modify token] [--s3-scan S3_SCAN] [-v] [-c CONCURRENCY] [-nl] [-gs]
-                  [-e EXTENSIONS] [-x EXCLUDE] [-u] [--shodan-api SHODAN_API]
+                  [-jwt-modify token] [-heapds heapdump.txt] [-heapts domain.com]
+                  [-f_p domain.com] [-nl] [-nc domain.com] [-nct template.yaml] [-v]
+                  [-c CONCURRENCY] [-gs] [-e EXTENSIONS] [-x EXCLUDE] [-u]
+                  [--shodan-api SHODAN_API] [--proxy PROXY] [--proxy-file PROXY_FILE]
+                  [--heapdump HEAPDUMP] [--output-dir OUTPUT_DIR] [-aws domain.com]
+                  [-az domain.com] [--s3-scan S3_SCAN] [-gcp domain.com] [-zt domain.com]
+                  [-ssrfp domains.txt] [--ipinfo TARGET] [--token TOKEN]
+                  [--save-ranges FILENAME] [--forbidden_domains FORBIDDEN_DOMAINS]
+                  [--brute-user-pass domain.com] [--username_wordlist domain.com]
+                  [--password_wordlist domain.com] [-fs HOST[:PORT]]
+                  [--ftp-userlist users.txt] [--ftp-passlist passwords.txt]
+                  [--ftp-proxylist proxies.txt] [--smb_scan] [--smb_auto]
+                  [--spray-userlist SPRAY_USERLIST] [--spray-passlist SPRAY_PASSLIST]
+                  [--spray-password SPRAY_PASSWORD] [--smb-target SMB_TARGET]
+                  [--smb-user SMB_USER] [--smb-pass SMB_PASS] [--smb-domain SMB_DOMAIN]
 
 options:
   -h, --help            show this help message and exit
@@ -122,22 +130,32 @@ options:
   -ed, --enumeratedomain domain.com
                         enumerate domains
   -isubs, --importantsubdomains domain list
-                        extract interesting subdomains from a list like dev, admin, test and
-                        etc..
+                        extract interesting subdomains from a list like dev, admin, test and etc..
   -webserver, --webserver_scan domain.com
                         webserver scan
-  --s3-scan S3_SCAN     Scan for exposed S3 buckets
   -v, --verbose         Increase output verbosity
   -c, --concurrency CONCURRENCY
                         Maximum number of concurrent requests
   --shodan-api SHODAN_API
                         Shodan API key for subdomain enumeration
+  --proxy PROXY         Use a proxy (e.g., http://proxy.com:8080)
+  --proxy-file PROXY_FILE
+                        Load proxies from file
+  --heapdump HEAPDUMP   Analyze Java heapdump file
+  --output-dir OUTPUT_DIR
+                        Output directory
+  --forbidden_domains FORBIDDEN_DOMAINS
+                        File containing list of domains to scan for forbidden bypass
 
 Update:
   -u, --update          Update the script
 
 Nuclei Scans:
   -nl, --nuclei_lfi     Find Local File Inclusion with nuclei
+  -nc, --nuclei domain.com
+                        scan nuclei on a target
+  -nct, --nuclei_template template.yaml
+                        use a nuclei template
 
 Vulnerability:
   -b, --brokenlinks domains.txt
@@ -164,6 +182,14 @@ Vulnerability:
                         analyze JWT token for vulnerabilities
   -jwt-modify, --jwt_modify token
                         modify JWT token
+  -heapds, --heapdump_file heapdump.txt
+                        file for heapdump scan
+  -heapts, --heapdump_target domain.com
+                        target for heapdump scan
+  -zt, --zone-transfer domain.com
+                        Test for DNS zone transfer vulnerability
+  -ssrfp, --ssrfparams domains.txt
+                        Get SSRF parameters from a list of domains
 
 Crawlers:
   -pspider, --paramspider domain.com
@@ -175,7 +201,7 @@ Crawlers:
                         scan for urls and js files
   -javascript, --javascript_scan domain.com
                         scan for sensitive info in javascript files
-  -dp, --depth 10       depth of the crawl
+  -dp, --depth DEPTH    Crawling depth (default: 2)
   -je, --javascript_endpoints file.txt
                         extract javascript endpoints
   -hibp, --haveibeenpwned password
@@ -183,8 +209,6 @@ Crawlers:
 
 Passive Recon:
   -s domain.com         scan for subdomains
-  -t, --tech domain.com
-                        find technologies
   -d, --dns domains.txt
                         scan a list of domains for dns records
   -na, --networkanalyzer https://domain.com
@@ -193,7 +217,7 @@ Passive Recon:
                         get the ips from a list of domains
   -dinfo, --domaininfo domain list
                         get domain information like codes,server,content length
-  -sho, --shodan domain.com
+  -sho, --shodan_ domain.com
                         Recon with shodan
   -shodan, --shodan_api KEY
                         shodan api key
@@ -214,6 +238,8 @@ Fuzzing:
                         asn
   -ar, --autorecon domain.com
                         auto recon
+  -f_p, --forbidden_pages domain.com
+                        forbidden pages
   -e, --extensions EXTENSIONS
                         Comma-separated list of file extensions to scan
   -x, --exclude EXCLUDE
@@ -227,9 +253,58 @@ Port Scanning:
   -ps, --ports 80,443,8443
                         Port numbers to scan
   -pai, --print_all_ips IP/24
-                        Print all ip
-```
+                        Print all ips
 
+Bruteforcing:
+  --brute-user-pass domain.com
+                        Bruteforcing username and password input fields
+  --username_wordlist domain.com
+                        Bruteforcing username and password input fields
+  --password_wordlist domain.com
+                        Bruteforcing username and password input fields
+
+FTP Scanning:
+  -fs, --ftp_scan HOST[:PORT]
+                        FTP server to scan (e.g., host or host:port)
+  --ftp-userlist users.txt
+                        Path to a custom username list for FTP bruteforcing
+  --ftp-passlist passwords.txt
+                        Path to a custom password list for FTP bruteforcing
+  --ftp-proxylist proxies.txt
+                        Path to a proxy list for FTP bruteforcing (format: socks5://host:port,
+                        socks4://host:port, http://host:port, or just IP:PORT for SOCKS5; only working
+                        proxies will be used automatically)
+
+Cloud Security:
+  -aws, --aws-scan domain.com
+                        Scan for exposed AWS resources
+  -az, --azure-scan domain.com
+                        Scan for exposed Azure resources
+  --s3-scan S3_SCAN     Scan for exposed S3 buckets
+  -gcp, --gcp-scan domain.com
+                        Scan for exposed GCP Storage resources
+
+IP Information:
+  --ipinfo TARGET       Get IP info for a company domain/IP
+  --token TOKEN         IPinfo API token
+  --save-ranges FILENAME
+                        Save IP ranges to file
+
+SMB Automated Pentest:
+  --smb_scan            Run SMB scan
+  --smb_auto            Run automated SMB pentest
+  --spray-userlist SPRAY_USERLIST
+                        User list for password spraying
+  --spray-passlist SPRAY_PASSLIST
+                        Password list for password spraying
+  --spray-password SPRAY_PASSWORD
+                        Single password to test against userlist
+  --smb-target SMB_TARGET
+                        Target IP or hostname for SMB automation
+  --smb-user SMB_USER   Username for credential testing
+  --smb-pass SMB_PASS   Password for credential testing
+  --smb-domain SMB_DOMAIN
+                        Domain for credential testing
 
 # EXAMPLE
 
@@ -237,9 +312,13 @@ Scan for subdomains and save the output to a file.
 ```
 python3 spyhunt.py -s yahoo.com --save filename.txt
 ```
-Scan for  subdomains but also extract subdomains from shodan
+Scan for subdomains but also extract subdomains from shodan
 ```
 python3 spyhunt.py -s yahoo.com --shodan API_KEY --save filename.txt
+```
+Scan a file of domains to extract subdomains
+```
+python3 spyhunt.py -s domains.txt --save filename.txt
 ```
 Scan for javascript files 
 ```
@@ -256,6 +335,10 @@ python3 spyhunt.py -fi domain.com
 Web Crawler
 ```
 python3 spyhunt.py -wc https://www.domain.com
+```
+Web Crawler with depth  
+```
+python3 spyhunt.py -wc https://www.domain.com --depth 5
 ```
 Broken Links
 ```
@@ -360,4 +443,68 @@ python3 spyhunt.py --aws_scan domain.com
 Cloud Azure Scan
 ```
 python3 spyhunt.py --azure_scan domain.com
+```
+Checks for 403 forbidden domains and saves it to a file 
+```
+python3 spyhunt.py --forbidden_pages domains.txt
+```
+Scan a list of domains to bypass 403 forbidden
+```
+python3 spyhunt.py --forbidden_domains domains.txt
+```
+Scan google storage
+```
+python3 spyhunt.py --gcp-scan domain.com
+```
+Brute Forcing Login Forms With Proxies
+```
+python3 spyhunt.py --brute-user-pass domain.com/login --username_wordlist usernames --password_wordlist passwords --proxy-file proxies.txt --verbose
+```
+Brute Forcing Login Forms Witout Proxies
+```
+python3 spyhunt.py --brute-user-pass domain.com/login --username_wordlist usernames --password_wordlist passwords --verbose
+```
+Nuclei Scan
+```
+python3 spyhunt.py --nuclei domain.com --nuclei-template nuclei-templates/cves/CVE-2024-22208.yaml
+```
+SSRF Params
+```
+python3 spyhunt.py --ssrfparams links.txt
+```
+FTP Scan
+```
+python3 spyhunt.py -fs domain.com
+```
+FTP Scan with a port
+```
+python3 spyhunt.py -fs domain.com:2121
+```
+FTP Scan with userlist and passlist
+```
+python3 spyhunt.py -fs domain.com --ftp-userlist usernames.txt --ftp-passlist passwords.txt
+```
+SMB Automated Pentest (Anonymous, Blank Creds, RID Brute)
+```
+python3 spyhunt.py --smb_auto --smb-target 10.129.228.111
+```
+SMB Pentest with Specific Credentials
+```
+python3 spyhunt.py --smb_auto --smb-target 10.129.228.111 --smb-user mhope --smb-pass ""
+```
+SMB Pentest with Domain Credentials
+```
+python3 spyhunt.py --smb_auto --smb-target 10.129.228.111 --smb-user mhope --smb-pass "" --smb-domain megabank.local
+```
+SMB Password Spraying with User and Password Lists
+```
+python3 spyhunt.py --smb_auto --smb-target 10.129.228.111 --spray-userlist users.txt --spray-passlist passwords.txt
+```
+SMB Password Spraying with Single Password
+```
+python3 spyhunt.py --smb_auto --smb-target 10.129.228.111 --spray-userlist users.txt --spray-password "Password1"
+```
+SMB Full Pentest (Credentials + Password Spray)
+```
+python3 spyhunt.py --smb_auto --smb-target 10.129.228.111 --smb-user mhope --smb-pass "" --spray-userlist users.txt --spray-password "Welcome1"
 ```

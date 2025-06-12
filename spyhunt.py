@@ -18,6 +18,8 @@ from modules.jwt_analyzer import JWTAnalyzer
 from modules.ss3sec import S3Scanner
 from datetime import datetime
 from modules.heap_dump import HeapdumpAnalyzer
+from impacket.smbconnection import SMBConnection, SessionError
+from fake_useragent import UserAgent
 import waybackpy
 import threading
 import os.path
@@ -54,6 +56,15 @@ import ssl
 import shutil
 import dns.zone
 import dns.query
+import ipinfo
+import uuid
+from ipaddress import ip_network
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
+from tqdm import tqdm
+from itertools import cycle
+import ftplib # Add this import
+import socks  # PySocks
 
 
 warnings.filterwarnings(action='ignore',module='bs4')
@@ -72,7 +83,7 @@ banner = f"""
 ░ ░▒  ░ ░░▒ ░     ▓██ ░▒░  ▒ ░▒░ ░░░▒░ ░ ░ ░ ░░   ░ ▒░    ░    
 ░  ░  ░  ░░       ▒ ▒ ░░   ░  ░░ ░ ░░░ ░ ░    ░   ░ ░   ░      
       ░           ░ ░      ░  ░  ░   ░              ░         
-{Fore.WHITE}V 3.0
+{Fore.WHITE}V 3.4
 {Fore.WHITE}By c0deninja
 {Fore.RESET}
 """
@@ -103,6 +114,8 @@ crawlers_group = parser.add_argument_group('Crawlers')
 passiverecon_group = parser.add_argument_group('Passive Recon')
 fuzzing_group = parser.add_argument_group('Fuzzing')
 portscanning_group = parser.add_argument_group('Port Scanning')
+bruteforcing_group = parser.add_argument_group('Bruteforcing')
+ftp_group = parser.add_argument_group('FTP Scanning') # New argument group
 
 group.add_argument('-sv', '--save', action='store',
                    help="save output to file",
@@ -224,7 +237,7 @@ fuzzing_group.add_argument('-api', '--api_fuzzer',
                     type=str, help='Look for API endpoints',
                     metavar='domain.com')
 
-passiverecon_group.add_argument('-sho', '--shodan',
+passiverecon_group.add_argument('-sho', '--shodan_',
                     type=str, help='Recon with shodan',
                     metavar='domain.com')
 
@@ -269,8 +282,10 @@ crawlers_group.add_argument('-javascript', '--javascript_scan',
                     metavar='domain.com')
 
 crawlers_group.add_argument('-dp', '--depth',
-                    type=str, help='depth of the crawl',
-                    metavar='10')
+                          type=int,           # Make sure this is int
+                          default=2,
+                          help='Crawling depth (default: 2)',
+                          metavar='DEPTH')
 
 crawlers_group.add_argument('-je', '--javascript_endpoints',
                     type=str, help='extract javascript endpoints',
@@ -320,15 +335,18 @@ vuln_group.add_argument('-heapts', '--heapdump_target',
                      type=str, help='target for heapdump scan',
                      metavar='domain.com')
 
+fuzzing_group.add_argument('-f_p', '--forbidden_pages',
+                     type=str, help='forbidden pages',
+                     metavar='domain.com')
 
+nuclei_group.add_argument('-nl', '--nuclei_lfi', action='store_true', help="Find Local File Inclusion with nuclei")
+nuclei_group.add_argument("-nc", "--nuclei", type=str, help="scan nuclei on a target", metavar="domain.com")
+nuclei_group.add_argument("-nct", "--nuclei_template", type=str, help="use a nuclei template", metavar="template.yaml")
 
-parser.add_argument('--s3-scan', help='Scan for exposed S3 buckets')
 
 parser.add_argument("-v", "--verbose", action="store_true", help="Increase output verbosity")
 
 parser.add_argument("-c", "--concurrency", type=int, default=10, help="Maximum number of concurrent requests")
-
-nuclei_group.add_argument('-nl', '--nuclei_lfi', action='store_true', help="Find Local File Inclusion with nuclei")
 
 passiverecon_group.add_argument('-gs', '--google', action='store_true', help='Google Search')
 
@@ -356,16 +374,160 @@ cloud_group.add_argument('-aws', '--aws-scan',
 cloud_group.add_argument('-az', '--azure-scan',
                     type=str, help='Scan for exposed Azure resources',
                     metavar='domain.com')
+cloud_group.add_argument('--s3-scan', help='Scan for exposed S3 buckets')
+cloud_group.add_argument('-gcp', '--gcp-scan',
+                    type=str, help='Scan for exposed GCP Storage resources',
+                    metavar='domain.com')
 
 # Add to argument groups
 vuln_group.add_argument('-zt', '--zone-transfer', 
                     type=str, help='Test for DNS zone transfer vulnerability',
                     metavar='domain.com')
 
+# Extract SSRF Paremeters
 
+vuln_group.add_argument('-ssrfp', '--ssrfparams', type=str, help='Get SSRF parameters from a list of domains', metavar='domains.txt')
+                    
+                                       
+# Add to argument groups
+ip_group = parser.add_argument_group('IP Information')
+ip_group.add_argument('--ipinfo', type=str, help='Get IP info for a company domain/IP', metavar='TARGET')
+ip_group.add_argument('--token', type=str, help='IPinfo API token', metavar='TOKEN')
+ip_group.add_argument('--save-ranges', type=str, help='Save IP ranges to file', metavar='FILENAME')
+parser.add_argument('--forbidden_domains', help='File containing list of domains to scan for forbidden bypass')
+
+# Bruteforcing groups
+bruteforcing_group.add_argument('--brute-user-pass', type=str, help='Bruteforcing username and password input fields', metavar='domain.com')
+bruteforcing_group.add_argument('--username_wordlist', type=str, help='Bruteforcing username and password input fields', metavar='domain.com')
+bruteforcing_group.add_argument('--password_wordlist', type=str, help='Bruteforcing username and password input fields', metavar='domain.com')
+
+# FTP arguments
+ftp_group.add_argument('-fs', '--ftp_scan',
+                    type=str, help='FTP server to scan (e.g., host or host:port)',
+                    metavar='HOST[:PORT]')
+ftp_group.add_argument('--ftp-userlist',
+                    type=str, help='Path to a custom username list for FTP bruteforcing',
+                    metavar='users.txt')
+ftp_group.add_argument('--ftp-passlist',
+                    type=str, help='Path to a custom password list for FTP bruteforcing',
+                    metavar='passwords.txt')
+ftp_group.add_argument('--ftp-proxylist',
+                    type=str, help='Path to a proxy list for FTP bruteforcing (format: socks5://host:port, socks4://host:port, http://host:port, or just IP:PORT for SOCKS5; only working proxies will be used automatically)',
+                    metavar='proxies.txt')
+
+# Add SMB Automated Pentest Arguments
+auto_smb_group = parser.add_argument_group('SMB Automated Pentest')
+auto_smb_group.add_argument('--smb_scan', action='store_true', help='Run SMB scan')
+auto_smb_group.add_argument('--smb_auto', action='store_true', help='Run automated SMB pentest')
+auto_smb_group.add_argument('--spray-userlist', type=str, help='User list for password spraying')
+auto_smb_group.add_argument('--spray-passlist', type=str, help='Password list for password spraying')
+auto_smb_group.add_argument('--spray-password', type=str, help='Single password to test against userlist')
+auto_smb_group.add_argument('--smb-target', type=str, help='Target IP or hostname for SMB automation')
+auto_smb_group.add_argument('--smb-user', type=str, help='Username for credential testing')
+auto_smb_group.add_argument('--smb-pass', type=str, help='Password for credential testing')
+auto_smb_group.add_argument('--smb-domain', type=str, help='Domain for credential testing', default='')
 
 
 args = parser.parse_args()
+
+# Add new function for IP info scanning
+def scan_ip_info(target, token):
+    """Get IP ranges and ASN information using IPinfo API"""
+    try:
+        # First resolve domain to IP if target is a domain
+        try:
+            ip = socket.gethostbyname(target)
+            if ip != target:
+                print(f"{Fore.CYAN}Resolved {target} to {ip}{Style.RESET_ALL}\n")
+        except socket.gaierror:
+            print(f"{Fore.RED}Could not resolve {target} to IP address{Style.RESET_ALL}")
+            return None
+
+        handler = ipinfo.getHandler(token)
+        print(f"{Fore.MAGENTA}Gathering IP information for {Fore.CYAN}{target}{Style.RESET_ALL}\n")
+        
+        # Get initial IP info using resolved IP
+        details = handler.getDetails(ip)
+        
+        # Print findings
+        print(f"{Fore.GREEN}IP Information:{Style.RESET_ALL}")
+        print(f"IP: {Fore.CYAN}{details.ip}{Style.RESET_ALL}")
+        if hasattr(details, 'hostname') and details.hostname:
+            print(f"Hostname: {Fore.CYAN}{details.hostname}{Style.RESET_ALL}")
+        if hasattr(details, 'org') and details.org:
+            print(f"Organization: {Fore.CYAN}{details.org}{Style.RESET_ALL}")
+        if hasattr(details, 'country') and details.country:
+            print(f"Country: {Fore.CYAN}{details.country}{Style.RESET_ALL}")
+        if hasattr(details, 'city') and details.city:
+            print(f"City: {Fore.CYAN}{details.city}{Style.RESET_ALL}")
+
+        # Get ASN information
+        if hasattr(details, 'org') and details.org:
+            try:
+                org_parts = details.org.split()
+                if org_parts:
+                    asn = org_parts[0]  # Get ASN number
+                    org_name = ' '.join(org_parts[1:])  # Get organization name
+                    
+                    print(f"\n{Fore.GREEN}ASN Information:{Style.RESET_ALL}")
+                    print(f"ASN: {Fore.CYAN}{asn}{Style.RESET_ALL}")
+                    print(f"Organization: {Fore.CYAN}{org_name}{Style.RESET_ALL}")
+                    
+                    # Try to get IP ranges for this ASN
+                    try:
+                        ranges = []
+                        print(f"\n{Fore.GREEN}IP Ranges:{Style.RESET_ALL}")
+                        
+                        # Use a separate request to get ranges
+                        response = requests.get(f"https://ipinfo.io/{asn}/prefixes?token={token}")
+                        if response.status_code == 200:
+                            prefixes_data = response.json()
+                            if 'prefixes' in prefixes_data:
+                                for prefix in prefixes_data['prefixes']:
+                                    try:
+                                        netw = prefix.get('netblock', '')
+                                        if netw:
+                                            network = ip_network(netw)
+                                            ranges.append({
+                                                'range': str(network),
+                                                'num_ips': network.num_addresses
+                                            })
+                                            print(f"{Fore.CYAN}{network}{Fore.YELLOW} ({network.num_addresses} IPs){Style.RESET_ALL}")
+                                    except ValueError as e:
+                                        print(f"{Fore.RED}Error parsing network {netw}: {e}{Style.RESET_ALL}")
+                        
+                        # Save ranges if requested
+                        if args.save_ranges and ranges:
+                            try:
+                                with open(args.save_ranges, 'w') as f:
+                                    f.write(f"# IP Ranges for {target}\n")
+                                    f.write(f"# ASN: {asn}\n")
+                                    f.write(f"# Organization: {org_name}\n\n")
+                                    for r in ranges:
+                                        f.write(f"{r['range']} # {r['num_ips']} IPs\n")
+                                print(f"\n{Fore.GREEN}IP ranges saved to {args.save_ranges}{Style.RESET_ALL}")
+                            except Exception as e:
+                                print(f"{Fore.RED}Error saving IP ranges: {e}{Style.RESET_ALL}")
+                    
+                    except Exception as e:
+                        print(f"{Fore.RED}Error getting IP ranges: {e}{Style.RESET_ALL}")
+                        
+            except Exception as e:
+                print(f"{Fore.RED}Error processing ASN information: {e}{Style.RESET_ALL}")
+
+        return details
+
+    except Exception as e:
+        print(f"{Fore.RED}Error: {e}{Style.RESET_ALL}")
+        return None
+
+# Add to main argument handling
+if args.ipinfo:
+    if not args.token:
+        print(f"{Fore.RED}Error: IPinfo API token required. Use --token to provide it.{Style.RESET_ALL}")
+        sys.exit(1)
+    scan_ip_info(args.ipinfo, args.token)
+
 
 user_agent = useragent_list.get_useragent()
 header = {"User-Agent": user_agent}
@@ -466,78 +628,98 @@ if args.update:
     else:
         sys.exit(1)
 
-if args.s:
+def process_domain(domain, save_file=None, shodan_api=None):
+    """Process a single domain for subdomain enumeration"""
     current_script_dir = os.path.dirname(os.path.abspath(__file__))
     spotter_path = os.path.join(current_script_dir, 'scripts', 'spotter.sh')
     certsh_path = os.path.join(current_script_dir, 'scripts', 'certsh.sh')
-    if args.save:
-        print(Fore.CYAN + "Saving output to {}...".format(args.save))
-        cmd = f"subfinder -d {args.s} -silent"
-        p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        out, err = p.communicate()
-        out = out.decode() 
-        with open(f"{args.save}", "a") as subfinder:
-            subfinder.writelines(out)
-        if path.exists(f"{args.save}"):
-            print(Fore.GREEN + "DONE!")
-        if not path.exists(f"{args.save}"):
-            print(Fore.RED + "ERROR!")
-            sys.exit(1)
-
-        cmd = f"{spotter_path} {args.s} | uniq | sort"
-        p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        spotterout, err = p.communicate()
-        spotterout = spotterout.decode()
-        with open(f"{args.save}", "a") as spotter:
-            spotter.writelines(spotterout)
-
-        cmd = f"{certsh_path} {args.s} | uniq | sort"
-        p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        certshout, err = p.communicate()
-        certshout = certshout.decode()
-        with open(f"{args.save}", "a") as certsh:
-            certsh.writelines(certshout)
-
-        # Shodan subdomain extraction
-        if args.shodan_api:
-            api = shodan.Shodan(args.shodan_api)
-            try:
-                results = api.search(f'hostname:*.{args.s}')
-                shodan_subdomains = set()
-                for result in results['matches']:
-                    hostnames = result.get('hostnames', [])
-                    for hostname in hostnames:
-                        if hostname.endswith(args.s) and hostname != args.s:
-                            shodan_subdomains.add(hostname)
-                with open(f"{args.save}", "a") as shodan_file:
-                    for subdomain in sorted(shodan_subdomains):
-                        shodan_file.write(f"{subdomain}\n")
-                print(Fore.GREEN + f"Added {len(shodan_subdomains)} subdomains from Shodan")
-            except shodan.APIError as e:
-                print(Fore.RED + f"Error querying Shodan: {e}")
+    
+    results = []
+    
+    # Subfinder
+    cmd = f"subfinder -d {domain} -silent"
+    p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    out, _ = p.communicate()
+    results.extend(out.decode().splitlines())
+    
+    # Spotter
+    cmd = f"{spotter_path} {domain} | uniq | sort"
+    p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    spotterout, _ = p.communicate()
+    results.extend(spotterout.decode().splitlines())
+    
+    # Cert.sh
+    cmd = f"{certsh_path} {domain} | uniq | sort"
+    p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    certshout, _ = p.communicate()
+    results.extend(certshout.decode().splitlines())
+    
+    # Shodan
+    if shodan_api:
+        try:
+            api = shodan.Shodan(shodan_api)
+            results = api.search(f'hostname:*.{domain}')
+            for result in results['matches']:
+                hostnames = result.get('hostnames', [])
+                for hostname in hostnames:
+                    if hostname.endswith(domain) and hostname != domain:
+                        results.append(hostname)
+        except shodan.APIError as e:
+            print(Fore.RED + f"Error querying Shodan for {domain}: {e}")
+    
+    # Remove duplicates and sort
+    results = sorted(set(results))
+    
+    if save_file:
+        with open(save_file, "a") as f:
+            for subdomain in results:
+                if "www" in subdomain:
+                    pass
+                else:
+                    f.write(f"{subdomain}\n")
+        print(Fore.GREEN + f"Found {len(results)} subdomains for {domain}")
     else:
-        commands(f"subfinder -d {args.s}")
-        commands(f"assetfinder -subs-only {args.s} | uniq | sort")
-        commands(f"{spotter_path} {args.s} | uniq | sort")
-        commands(f"{certsh_path} {args.s} | uniq | sort")
+        print(Fore.CYAN + f"\nSubdomains for {domain}:\n")
+        for subdomain in results:
+            print(Fore.GREEN + f"{subdomain}")
 
-        # Shodan subdomain extraction
-        if args.shodan_api:
-            api = shodan.Shodan(args.shodan_api)
-            try:
-                results = api.search(f'hostname:*.{args.s}')
-                shodan_subdomains = set()
-                for result in results['matches']:
-                    hostnames = result.get('hostnames', [])
-                    for hostname in hostnames:
-                        if hostname.endswith(args.s) and hostname != args.s:
-                            shodan_subdomains.add(hostname)
-                print(Fore.CYAN + "Subdomains found from Shodan:")
-                for subdomain in sorted(shodan_subdomains):
-                    print(subdomain)
-                print(Fore.GREEN + f"Found {len(shodan_subdomains)} subdomains from Shodan")
-            except shodan.APIError as e:
-                print(Fore.RED + f"Error querying Shodan: {e}")
+# Modify the argument parser to accept either a single domain or a file
+if args.s:
+    if os.path.isfile(args.s):
+        # Reading domains from file
+        print(Fore.CYAN + f"Reading domains from {args.s}")
+        with open(args.s) as f:
+            domains = [line.strip() for line in f if line.strip()]
+        
+        for domain in domains:
+            print(Fore.YELLOW + f"\nProcessing {domain}...")
+            process_domain(domain, args.save, args.shodan_api)
+    else:
+        # Single domain
+        process_domain(args.s, args.save, args.shodan_api)
+
+if args.forbidden_pages:
+    def save_forbidden_pages(url):
+        with open(f"forbidden_pages.txt", "a") as f:
+            f.write(f"{url}\n")
+    try:
+        s = requests.Session()
+        with open(f"{args.forbidden_pages}") as f:
+            pages = [x.strip() for x in f.readlines()]
+
+        for page in pages:
+            r = s.get(page, verify=False, timeout=10)
+            if r.status_code == 403:
+                print(f"{Fore.RED}{page} [{r.status_code}]{Style.RESET_ALL}")
+                save_forbidden_pages(page)
+            else:
+                pass
+    except requests.exceptions.ReadTimeout:
+        pass
+    except requests.exceptions.ConnectionError:
+        pass
+    except requests.exceptions.RequestException:
+        pass
 
 if args.reverseip:
     domain = socket.gethostbyaddr(args.reverseip)
@@ -556,11 +738,88 @@ if args.reverseipmulti:
 
 
 if args.webcrawler:
-    if args.save:
-        print(Fore.CYAN + f"Saving output to {args.save}")
-        commands(f"echo {args.webcrawler} | hakrawler >> {args.save}")
-    else:
-        commands(f"echo {args.webcrawler} | hakrawler")
+    def is_same_domain(url: str, base_domain: str) -> bool:
+        """Check if URL belongs to the same domain"""
+        return urlparse(url).netloc == urlparse(base_domain).netloc
+
+    def get_links(domain: str, visited: set = None) -> set:
+        """Extract links from a webpage"""
+        if visited is None:
+            visited = set()
+        
+        if domain in visited:
+            return set()
+            
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            r = requests.get(domain, headers=headers, verify=False, timeout=5)
+            soup = BeautifulSoup(r.text, "html.parser")
+            links = set()
+            
+            for tag in soup.find_all("a", href=True):
+                href = tag.get("href")
+                if href:
+                    if not href.startswith(("https://", "http://")):
+                        link = urljoin(domain, href)
+                    else:
+                        link = href
+                        
+                    if is_same_domain(link, domain):
+                        links.add(link)
+                        
+            return links
+            
+        except Exception as e:
+            print(f"{Fore.RED}Error crawling {domain}: {str(e)}{Fore.WHITE}")
+            return set()
+
+    def crawl_recursive(domain: str, depth: int, visited: set = None) -> set:
+        """Recursively crawl pages up to specified depth"""
+        if visited is None:
+            visited = set()
+            
+        if depth <= 0 or domain in visited:
+            return set()
+            
+        visited.add(domain)
+        all_links = set()
+        
+        # Get links from current page
+        links = get_links(domain)
+        all_links.update(links)
+        
+        # Recursively crawl discovered links
+        with ThreadPoolExecutor(max_workers=50) as executor:
+            futures = []
+            for link in links:
+                if link not in visited:
+                    futures.append(executor.submit(crawl_recursive, link, depth - 1, visited))
+            
+            # Process results from recursive crawls
+            for future in as_completed(futures):
+                try:
+                    sub_links = future.result()
+                    all_links.update(sub_links)
+                except Exception as e:
+                    print(f"{Fore.RED}Error processing results: {str(e)}{Fore.WHITE}")
+                    
+        return all_links
+
+    if __name__ == "__main__":
+        domain = args.webcrawler
+        depth = int(args.depth)  # Convert to integer explicitly
+        
+        print(f"{Fore.CYAN}Starting crawl of {domain} with depth {depth}...{Fore.WHITE}")
+        
+        # Start recursive crawl
+        all_urls = crawl_recursive(domain, depth)
+        
+        # Print results
+        print(f"\n{Fore.GREEN}Found {len(all_urls)} unique URLs:{Fore.WHITE}")
+        for url in sorted(all_urls):
+            print(url)
 
 
 if args.statuscode:
@@ -1266,7 +1525,7 @@ if args.api_fuzzer:
                 pass
             
 
-if args.shodan:
+if args.shodan_:
     key = input("Shodan Key: ")
     print("\n")
     api = shodan.Shodan(str(key))
@@ -1287,7 +1546,7 @@ if args.shodan:
         pass
 
 
-if args.forbiddenpass:
+if args.forbiddenpass or args.forbidden_domains:
     def word_list(wordlist: str) -> str:
         try:
             with open(wordlist, "r") as f:
@@ -1323,10 +1582,51 @@ if args.forbiddenpass:
             {'User-Agent': str(user_agent), 'X-Forwarded-Port': '8080'},
             {'User-Agent': str(user_agent), 'X-Forwarded-Port': '8443'},
             {'User-Agent': str(user_agent), 'X-ProxyUser-Ip': '127.0.0.1'},
-            {'User-Agent': str(user_agent), 'Client-IP': '127.0.0.1'}
+            {'User-Agent': str(user_agent), 'Client-IP': '127.0.0.1'},
+            {'User-Agent': str(user_agent), 'X-Real-IP': '127.0.0.1'},
+            {'User-Agent': str(user_agent), 'X-Original-URL': '/admin'},
+            {'User-Agent': str(user_agent), 'X-Rewrite-URL': '/admin'},
+            {'User-Agent': str(user_agent), 'X-Originating-URL': '/admin'},
+            {'User-Agent': str(user_agent), 'X-Forwarded-Server': 'localhost'},
+            {'User-Agent': str(user_agent), 'X-Forwarded-Scheme': 'http'},
+            {'User-Agent': str(user_agent), 'X-Original-Remote-Addr': '127.0.0.1'},
+            {'User-Agent': str(user_agent), 'X-Forwarded-Protocol': 'http'},
+            {'User-Agent': str(user_agent), 'X-Original-Host': 'localhost'},
+            {'User-Agent': str(user_agent), 'Proxy-Host': 'localhost'},
+            {'User-Agent': str(user_agent), 'Request-Uri': '/admin'},
+            {'User-Agent': str(user_agent), 'X-Server-IP': '127.0.0.1'},
+            {'User-Agent': str(user_agent), 'X-Forwarded-SSL': 'off'},
+            {'User-Agent': str(user_agent), 'X-Original-URL': '127.0.0.1'},
+            {'User-Agent': str(user_agent), 'X-Client-Port': '443'},
+            {'User-Agent': str(user_agent), 'X-Backend-Host': 'localhost'},
+            {'User-Agent': str(user_agent), 'X-Remote-Addr': '127.0.0.1'},
+            {'User-Agent': str(user_agent), 'X-Remote-Port': '443'},
+            {'User-Agent': str(user_agent), 'X-Host-Override': 'localhost'},
+            {'User-Agent': str(user_agent), 'X-Forwarded-Server': 'localhost:80'},
+            {'User-Agent': str(user_agent), 'X-Host-Name': 'localhost'},
+            {'User-Agent': str(user_agent), 'X-Proxy-URL': 'http://127.0.0.1'},
+            {'User-Agent': str(user_agent), 'Base-Url': 'http://127.0.0.1'},
+            {'User-Agent': str(user_agent), 'HTTP-X-Forwarded-For': '127.0.0.1'},
+            {'User-Agent': str(user_agent), 'HTTP-Client-IP': '127.0.0.1'},
+            {'User-Agent': str(user_agent), 'HTTP-X-Real-IP': '127.0.0.1'},
+            {'User-Agent': str(user_agent), 'Proxy-Url': 'http://127.0.0.1'},
+            {'User-Agent': str(user_agent), 'X-Forward-For': '127.0.0.1'},
+            {'User-Agent': str(user_agent), 'X-Originally-Forwarded-For': '127.0.0.1'},
+            {'User-Agent': str(user_agent), 'X-Forwarded': '127.0.0.1'},
+            {'User-Agent': str(user_agent), 'Forwarded-For': '127.0.0.1'},
+            {'User-Agent': str(user_agent), 'Forwarded-For-Ip': '127.0.0.1'},
+            {'User-Agent': str(user_agent), 'X-Forwarded-By': '127.0.0.1'},
+            {'User-Agent': str(user_agent), 'X-Forwarded-For-Original': '127.0.0.1'},
+            {'User-Agent': str(user_agent), 'X-Forwarded-Host-Original': 'localhost'},
+            {'User-Agent': str(user_agent), 'X-Pwnage': '127.0.0.1'},
+            {'User-Agent': str(user_agent), 'X-Bypass': '127.0.0.1'},
 
         ]
         return headers
+    
+    def save_forbidden_bypass(url):
+        with open("forbidden_bypass.txt", "a") as f:
+            f.write(f"{url}\n")
     
     def do_request(url: str, stream=False):
         headers = header_bypass()
@@ -1334,30 +1634,52 @@ if args.forbiddenpass:
             for header in headers:
                 if stream:
                     s = requests.Session()
-                    r = s.get(url, stream=True, headers=header)
+                    r = s.get(url, stream=True, headers=header, verify=False, timeout=10)
                 else:
                     s = requests.Session()
-                    r = s.get(url, headers=header)
+                    r = s.get(url, headers=header, verify=False, timeout=10)
                 if r.status_code == 200:
                     print(Fore.WHITE + url + ' ' + json.dumps(list(header.items())[-1]) + Fore.GREEN + " [{}]".format(r.status_code))
+                    save_forbidden_bypass(url)
+                elif r.status_code == 403:
+                    print(Fore.WHITE + url + ' ' + json.dumps(list(header.items())[-1]) + Fore.RED + " [{}]".format(r.status_code))
                 else:
                     print(Fore.WHITE + url + ' ' + json.dumps(list(header.items())[-1]) + Fore.RED + " [{}]".format(r.status_code))
-        except requests.exceptions.ConnectionError as ce_error:
+        except requests.exceptions.ConnectionError:
             pass
-        except requests.exceptions.Timeout as t_error:
-            print("Connection Timeout Error: ", t_error)
+        except requests.exceptions.Timeout:
             pass
-        except requests.exceptions.RequestException as req_err:
-            print("Some Ambiguous Exception:", req_err)
+        except requests.exceptions.RequestException:
             pass
 
-    def main(wordlist):
+    def load_domains(filename: str) -> list:
+        try:
+            with open(filename, "r") as f:
+                return [x.strip() for x in f.readlines()]
+        except FileNotFoundError as e:
+            print(f"{Fore.RED}Domain file not found: {e}{Style.RESET_ALL}")
+            return []
+
+    def scan_domain(domain: str, wordlist: list):
+        if not domain.startswith(('http://', 'https://')):
+            domain = f"https://{domain}"
+        print(f"\n{Fore.YELLOW}Scanning domain: {domain}{Style.RESET_ALL}")
         for bypass in wordlist:
-            links = f"{args.forbiddenpass}{bypass}"
+            links = f"{domain}{bypass}"
             do_request(links)
 
+    def main():
+        if args.forbidden_domains:
+            domains = load_domains(args.forbidden_domains)
+            print(f"{Fore.CYAN}Starting scan of {len(domains)} domains...{Style.RESET_ALL}\n")
+            for domain in domains:
+                scan_domain(domain, wordlist)
+        
+        if args.forbiddenpass:
+            scan_domain(args.forbiddenpass, wordlist)
+
     if __name__ == "__main__":
-        main(wordlist)
+        main()
 
 if args.directorybrute:
     if args.wordlist:
@@ -2823,7 +3145,7 @@ if args.autorecon:
             parsed_url = urlparse(link)
             query_params = parse_qs(parsed_url.query)
             if query_params:
-                parameters[link] = query_params
+                parameters[link] = query_args
         return parameters
 
     def shodan_search(target, api):
@@ -3198,3 +3520,1503 @@ if args.zone_transfer:
             test_zone_transfer(domain, ns)
     else:
         print(f"{Fore.RED}No nameservers found for {domain}{Style.RESET_ALL}")
+
+if args.ipinfo:
+    if not args.token:
+        print(f"{Fore.RED}Error: IPinfo API token required. Use --token to provide it.{Style.RESET_ALL}")
+        sys.exit(1)
+    scan_ip_info(args.ipinfo, args.token)
+
+async def handle_gcp_scan(target):
+    """
+    Scan for exposed Google Cloud Platform storage buckets and resources
+    
+    Args:
+        target: Domain or organization name to scan
+    """
+    try:
+        # Clean up the target to extract just the domain
+        if target.startswith(('http://', 'https://')):
+            parsed_url = urlparse(target)
+            target = parsed_url.netloc
+        target = target.replace('www.', '')  # Remove www if present
+        
+        print(f"{Fore.BLUE}[*] Scanning for exposed GCP Storage resources for {target}{Style.RESET_ALL}")
+        
+        # Common GCP bucket naming patterns
+        bucket_patterns = [
+            f"{target}",
+            f"{target}-storage",
+            f"{target}-bucket",
+            f"{target}-data",
+            f"{target}-assets",
+            f"{target}-media",
+            f"{target}-backup",
+            f"{target}-archive",
+            f"{target}-files",
+            f"{target}-public",
+            f"{target}-private",
+            f"{target}-dev",
+            f"{target}-prod",
+            f"{target}-stage",
+            f"{target}-staging",
+            f"{target}-test",
+            f"{target}-uat",
+            f"{target}-content",
+            f"{target}-static",
+            f"{target}-images",
+            f"{target}-docs",
+            f"{target}-documents",
+            f"{target}-logs",
+            f"{target.replace('.', '-')}",
+            f"{target.split('.')[0]}"
+        ]
+        
+        # Add variations with company name
+        company_name = target.split('.')[0]
+        bucket_patterns.extend([
+            f"gcp-{company_name}",
+            f"storage-{company_name}",
+            f"bucket-{company_name}",
+            f"{company_name}-gcp"
+        ])
+        
+        found_buckets = []
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            futures = []
+            for pattern in bucket_patterns:
+                futures.append(executor.submit(check_gcp_bucket, pattern))
+            
+            for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Checking GCP buckets"):
+                result = future.result()
+                if result:
+                    found_buckets.append(result)
+        
+        if found_buckets:
+            print(f"{Fore.GREEN}[+] Found {len(found_buckets)} potentially exposed GCP Storage buckets:{Style.RESET_ALL}")
+            for bucket in found_buckets:
+                print(f"  - {bucket}")
+        else:
+            print(f"{Fore.YELLOW}[!] No exposed GCP Storage buckets found{Style.RESET_ALL}")
+        
+        # Check for other GCP services
+        await check_gcp_services(target)
+    except Exception as e:
+        print(f"{Fore.RED}[!] Error during GCP scan: {str(e)}{Style.RESET_ALL}")
+
+def check_gcp_bucket(bucket_name):
+    """
+    Check if a GCP Storage bucket exists and is publicly accessible
+    
+    Args:
+        bucket_name: Name of the bucket to check
+        
+    Returns:
+        Bucket URL if found and accessible, None otherwise
+    """
+    try:
+        bucket_url = f"https://storage.googleapis.com/{bucket_name}/"
+        
+        response = requests.get(bucket_url, timeout=10)
+        
+        # Check if bucket exists
+        if response.status_code == 200:
+            # Check if we can list bucket contents
+            if "ListBucketResult" in response.text:
+                print(f"{Fore.RED}[!] Found publicly accessible GCP bucket: {bucket_url}{Style.RESET_ALL}")
+                return bucket_url
+            else:
+                print(f"{Fore.YELLOW}[!] Found GCP bucket but cannot list contents: {bucket_url}{Style.RESET_ALL}")
+                return bucket_url
+        
+        # Check for access denied (bucket exists but is not public)
+        elif response.status_code == 403:
+            print(f"{Fore.YELLOW}[!] Found GCP bucket but access is denied: {bucket_url}{Style.RESET_ALL}")
+            return None
+            
+    except requests.exceptions.RequestException:
+        return None
+    except Exception as e:
+        print(f"{Fore.RED}[!] Error checking GCP bucket {bucket_name}: {str(e)}{Style.RESET_ALL}")
+        return None
+    
+    return None
+
+async def check_gcp_services(domain):
+    """
+    Check for exposed GCP services related to the domain
+    
+    Args:
+        domain: Domain to check
+    """
+    try:
+        # Clean up the domain to extract just the domain name
+        if domain.startswith(('http://', 'https://')):
+            parsed_url = urlparse(domain)
+            domain = parsed_url.netloc
+        domain = domain.replace('www.', '')  # Remove www if present
+        
+        print(f"{Fore.BLUE}[*] Checking for exposed GCP services for {domain}{Style.RESET_ALL}")
+        
+        # Common GCP service endpoints to check
+        gcp_services = [
+            {"name": "Cloud Run", "url_pattern": f"https://{domain.split('.')[0]}-[a-z0-9]{{16}}.run.app", "regex": True},
+            {"name": "App Engine", "url_pattern": f"https://{domain.split('.')[0]}.appspot.com", "regex": False},
+            {"name": "Firebase", "url_pattern": f"https://{domain.split('.')[0]}.firebaseapp.com", "regex": False},
+            {"name": "Cloud Functions", "url_pattern": f"https://{domain.split('.')[0]}.cloudfunctions.net", "regex": False},
+            {"name": "GCP Load Balancer", "url_pattern": f"https://{domain}", "header": "Via", "value": "google"}
+        ]
+        
+        for service in gcp_services:
+            if service.get("regex", False):
+                # For regex patterns, we need to do DNS enumeration or other techniques
+                # This is a simplified placeholder
+                print(f"{Fore.YELLOW}[!] Regex-based detection for {service['name']} requires additional enumeration{Style.RESET_ALL}")
+                continue
+            
+            try:
+                url = service["url_pattern"]
+                response = requests.get(url, timeout=10)
+                
+                if service.get("header"):
+                    # Check for specific header
+                    if service["header"] in response.headers and service["value"].lower() in response.headers[service["header"]].lower():
+                        print(f"{Fore.GREEN}[+] Found {service['name']}: {url}{Style.RESET_ALL}")
+                        continue
+                
+                # Check based on status code
+                if response.status_code < 400:
+                    print(f"{Fore.GREEN}[+] Found {service['name']}: {url}{Style.RESET_ALL}")
+                
+            except requests.exceptions.RequestException:
+                # Service endpoint not found or not accessible
+                pass
+            except Exception as e:
+                print(f"{Fore.RED}[!] Error checking {service['name']}: {str(e)}{Style.RESET_ALL}")
+    except Exception as e:
+        print(f"{Fore.RED}[!] Error checking GCP services: {str(e)}{Style.RESET_ALL}")
+
+def check_gcp_exposure(domain):
+    """
+    Check for GCP resource exposure for a domain
+    
+    Args:
+        domain: Domain to check
+    """
+    try:
+        # Clean up the domain to extract just the domain name
+        if domain.startswith(('http://', 'https://')):
+            parsed_url = urlparse(domain)
+            domain = parsed_url.netloc
+        domain = domain.replace('www.', '')  # Remove www if present
+        
+        print(f"{Fore.BLUE}[*] Checking for GCP resource exposure for {domain}{Style.RESET_ALL}")
+        
+        # Check for common GCP project naming patterns
+        project_patterns = [
+            f"{domain.split('.')[0]}-project",
+            f"{domain.split('.')[0]}-prod",
+            f"{domain.split('.')[0]}-dev",
+            f"{domain.split('.')[0]}-test",
+            f"{domain.split('.')[0]}-staging",
+            domain.split('.')[0]
+        ]
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futures = []
+            for pattern in project_patterns:
+                futures.append(executor.submit(check_gcp_project, pattern))
+            
+            for future in tqdm(concurrent.futures.as_completed(futures), 
+                             total=len(futures), 
+                             desc="Checking GCP projects"):
+                try:
+                    future.result(timeout=15)  # 15 second timeout per project check
+                except concurrent.futures.TimeoutError:
+                    print(f"{Fore.YELLOW}[!] Timeout while checking a GCP project{Style.RESET_ALL}")
+                except Exception as e:
+                    print(f"{Fore.RED}[!] Error checking GCP project: {str(e)}{Style.RESET_ALL}")
+                    
+    except Exception as e:
+        print(f"{Fore.RED}[!] Error checking GCP resource exposure: {str(e)}{Style.RESET_ALL}")
+
+def check_gcp_project(pattern):
+    """
+    Check a single GCP project pattern
+    
+    Args:
+        pattern: Project pattern to check
+    """
+    try:
+        url = f"https://cloudresourcemanager.googleapis.com/v1/projects/{pattern}"
+        response = requests.get(url, timeout=10)
+        
+        if response.status_code == 200:
+            print(f"{Fore.RED}[!] Found publicly accessible GCP project: {pattern}{Style.RESET_ALL}")
+            try:
+                project_data = response.json()
+                print(f"  - Project Number: {project_data.get('projectNumber', 'N/A')}")
+                print(f"  - Project ID: {project_data.get('projectId', 'N/A')}")
+                print(f"  - Name: {project_data.get('name', 'N/A')}")
+                print(f"  - Labels: {project_data.get('labels', {})}")
+            except ValueError:
+                print(f"  - Unable to parse project data")
+        elif response.status_code == 403:
+            print(f"{Fore.YELLOW}[!] Found GCP project but access is denied: {pattern}{Style.RESET_ALL}")
+            
+    except requests.exceptions.Timeout:
+        print(f"{Fore.YELLOW}[!] Timeout while checking project: {pattern}{Style.RESET_ALL}")
+    except requests.exceptions.RequestException:
+        pass  # Silently ignore connection errors for non-existent projects
+    except Exception as e:
+        print(f"{Fore.RED}[!] Error checking project {pattern}: {str(e)}{Style.RESET_ALL}")
+
+    
+if args.gcp_scan:
+    asyncio.run(handle_gcp_scan(args.gcp_scan))
+    check_gcp_exposure(args.gcp_scan)
+
+
+# Bruteforcing username and password input fields
+
+def test_proxy(proxy, test_url="https://www.google.com", timeout=3):
+    """Test if a proxy works with both HTTP and HTTPS - optimized for speed"""
+    try:
+        # Reduce timeout for faster testing
+        if proxy.startswith('http'):
+            proxies = {'http': proxy, 'https': proxy}
+        else:
+            proxies = {'http': f'http://{proxy}', 'https': f'http://{proxy}'}
+            
+        # Use HEAD request instead of GET for faster response
+        response = requests.head(
+            test_url, 
+            proxies=proxies, 
+            timeout=timeout,
+            # Don't verify SSL to speed up connection
+            verify=False,
+            # Don't follow redirects to save time
+            allow_redirects=False
+        )
+        
+        # Accept any 2xx, 3xx status code as success
+        if 200 <= response.status_code < 400:
+            return True
+    except Exception:
+        # If that fails, try with explicit HTTP for HTTPS
+        try:
+            if not proxy.startswith('http'):
+                proxy = f'http://{proxy}'
+            proxies = {'http': proxy, 'https': proxy}
+            
+            # Use HEAD request for speed
+            response = requests.head(
+                test_url, 
+                proxies=proxies, 
+                timeout=timeout,
+                verify=False,
+                allow_redirects=False
+            )
+            
+            if 200 <= response.status_code < 400:
+                return True
+        except Exception:
+            pass
+    return False
+
+def load_proxies(proxy_file=None, test=True, max_workers=50):
+    """Load proxies from a file and optionally test them in parallel"""
+    if not proxy_file or not os.path.exists(proxy_file):
+        return []
+    with open(proxy_file, 'r') as f:
+        proxies = [x.strip() for x in f.readlines() if x.strip()]
+    
+    print(f"{Fore.WHITE}[*] Loaded {Fore.MAGENTA}{len(proxies)} proxies from file{Style.RESET_ALL}")
+    
+    if test:
+        print(f"{Fore.WHITE}[*] Testing proxies with {max_workers} concurrent workers...{Style.RESET_ALL}")
+        working_proxies = []
+        completed = 0
+        print_lock = threading.Lock()
+        
+        # Try to import tqdm for progress bar
+        try:
+            from tqdm import tqdm
+            progress_bar = tqdm(total=len(proxies), desc="Testing proxies", 
+                               unit="proxy", ncols=80, bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt}')
+            has_tqdm = True
+        except ImportError:
+            progress_bar = None
+            has_tqdm = False
+        
+        def test_proxy_task(proxy):
+            nonlocal completed
+            result = test_proxy(proxy)
+            
+            with print_lock:
+                completed += 1
+                if has_tqdm:
+                    progress_bar.update(1)
+                else:
+                    if completed % 10 == 0 or completed == len(proxies):
+                        print(f"{Fore.WHITE}[*] Tested {completed}/{len(proxies)} proxies ({(completed/len(proxies))*100:.1f}%){Style.RESET_ALL}", end='\r')
+                
+                if result:
+                    working_proxies.append(proxy)
+                    if not has_tqdm:
+                        print(f"\n{Fore.GREEN}[+] Working proxy: {proxy}{Style.RESET_ALL}")
+            
+            return result
+        
+        # Use ThreadPoolExecutor for parallel testing
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(test_proxy_task, proxy): proxy for proxy in proxies}
+            
+            # Wait for all futures to complete
+            concurrent.futures.wait(futures)
+        
+        if has_tqdm:
+            progress_bar.close()
+        
+        print(f"\n{Fore.WHITE}[*] Found {Fore.MAGENTA}{len(working_proxies)}/{len(proxies)} working proxies{Style.RESET_ALL}")
+        return working_proxies
+    
+    return proxies
+
+def get_random_user_agent():
+    """Generate a random user agent"""
+    try:
+        ua = UserAgent()
+        return ua.random
+    except:
+        # Fallback user agents if fake_useragent fails
+        user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36',
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1',
+            'Mozilla/5.0 (iPad; CPU OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/91.0.864.59 Safari/537.36',
+        ]
+        return random.choice(user_agents)
+
+def password_wordlist(file: str) -> list:
+    with open(file, 'r') as f:
+        passwords = [x.strip() for x in f.readlines()]
+    return passwords
+
+def username_wordlist(file: str) -> list:
+    with open(file, 'r') as f:
+        usernames = [x.strip() for x in f.readlines()]
+    return usernames
+
+def randomize_cookies(base_cookies=None):
+    """Generate randomized cookies"""
+    # Start with required cookies or empty dict
+    cookies = base_cookies.copy() if base_cookies else {}
+    
+    # Add random tracking-like cookies
+    random_cookies = {
+        f"_ga_{random.randint(1000, 9999)}": f"{uuid.uuid4()}",
+        f"visitor_id{random.randint(100, 999)}": f"{random.randint(10000, 999999)}",
+        "session_depth": str(random.randint(1, 5)),
+        "last_visit": str(int(time.time()) - random.randint(3600, 86400))
+    }
+    
+    # Randomly select some of these cookies
+    for k, v in random_cookies.items():
+        if random.random() > 0.6:  # 40% chance to include each cookie
+            cookies[k] = v
+            
+    return cookies
+
+
+def detect_2fa(response_text, response_url):
+    """
+    Detect if the response indicates a 2FA challenge
+    Returns True if 2FA is detected, False otherwise
+    """
+    # Convert to lowercase for case-insensitive matching
+    text_lower = response_text.lower()
+    url_lower = response_url.lower()
+    
+    # Common 2FA indicators in response text
+    text_indicators = [
+        'two-factor', 'two factor', '2fa', 'second factor', 
+        'verification code', 'security code', 'authenticator app',
+        'authentication code', 'one-time password', 'otp', 
+        'sms code', 'text message code', 'enter code',
+        'google authenticator', 'authy', 'duo', 'yubikey',
+        'multi-factor', 'mfa', 'additional verification',
+        'confirm your identity', 'additional security',
+        'security key', 'authentication token', 'Two-factor authentication',
+        'Authentication code'
+    ]
+    
+    # Common 2FA indicators in URL
+    url_indicators = [
+        '2fa', 'two-factor', 'twofactor', 'mfa', 'otp', 
+        'verification', 'verify', 'authenticator', 'security-code',
+        'second-step', 'second_step', 'challenge', 'sms'
+    ]
+    
+    # Check for 2FA indicators in response text
+    for indicator in text_indicators:
+        if indicator in text_lower:
+            return True
+    
+    # Check for 2FA indicators in URL
+    for indicator in url_indicators:
+        if indicator in url_lower:
+            return True
+    
+    # Check for input fields that might indicate 2FA
+    soup = BeautifulSoup(response_text, 'html.parser')
+    
+    # Look for verification code input fields
+    code_inputs = soup.find_all('input', {
+        'type': ['text', 'number', 'tel'],
+        'name': lambda x: x and any(term in x.lower() for term in [
+            'code', 'token', 'otp', 'verification', 'auth', 'factor'
+        ])
+    })
+    
+    if code_inputs:
+        return True
+    
+    # Look for 2FA-related form labels or text
+    labels = soup.find_all(['label', 'div', 'p', 'h1', 'h2', 'h3', 'h4', 'span'])
+    for label in labels:
+        if label.text and any(term in label.text.lower() for term in text_indicators):
+            return True
+    
+    return False
+
+def try_login_task(username, password, url, form_data, initial_url, success_indicators, verbose, proxy=None, user_agent=None, username_field=None, password_field=None):
+    """Helper function for threaded login attempts with proxy and user agent support"""
+    try:
+        # Set up headers with random user agent
+        headers = {'User-Agent': user_agent or get_random_user_agent()}
+        
+        # Set up proxy if provided
+        proxies = None
+        if proxy:
+            if proxy.startswith('http'):
+                proxies = {'http': proxy, 'https': proxy}
+            else:
+                proxies = {'http': f'http://{proxy}', 'https': f'https://{proxy}'}
+        
+        # Add a small random delay to further avoid detection
+        time.sleep(random.uniform(0.1, 0.5))
+
+        # Add random cookies technique, Makes requests appear to come from real browsers with history
+        cookies = randomize_cookies()
+        session = requests.Session()
+        session.cookies.update(cookies)
+        
+        # Make the request with proxy and custom headers
+        response = session.post(
+            url, 
+            data=form_data, 
+            headers=headers,
+            proxies=proxies,
+            allow_redirects=True,
+            cookies=cookies,
+            timeout=10  # Increased timeout for proxy connections
+        )
+        
+        response_text_lower = response.text.lower()
+
+        print_lock = threading.Lock()
+        # Check for 2FA before proceeding
+        if detect_2fa(response.text, response.url):
+            # Use print_lock to avoid garbled output in multithreaded context
+            with print_lock:
+                print(f"\n{Fore.YELLOW}[!] 2FA/MFA detected after login attempt with username: {Fore.MAGENTA}{username}{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}[!] Password may be correct, but 2FA is preventing access{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}[!] Bruteforcing halted as 2FA cannot be automatically bypassed{Style.RESET_ALL}")
+                
+                # If verbose, provide more details
+                if verbose:
+                    print(f"{Fore.WHITE}[*] Response URL: {Fore.GREEN}{response.url}{Style.RESET_ALL}")
+                    print(f"{Fore.WHITE}[*] Potential valid credentials: {Fore.MAGENTA}{username} : {password}{Style.RESET_ALL}")
+                
+                # Return a special value to indicate 2FA was detected
+                return ("2FA_DETECTED", username, password, response.url)
+        
+        # Quick check for obvious failures
+        if any(neg in response_text_lower for neg in success_indicators['negative']):
+            return None
+            
+        success = False
+        
+        # Check 1: URL change
+        if response.url != initial_url:
+            if any(indicator in response.url.lower() for indicator in success_indicators['url_change']):
+                success = True
+        
+        # Check 2: Content check
+        if any(indicator in response_text_lower for indicator in success_indicators['content']):
+            success = True
+            
+        # Check 3: Redirect check
+        if response.history and response.url != url and 'login' not in response.url.lower():
+            success = True
+            
+        if success:
+            return (username, password, response.url)
+    
+    except requests.exceptions.ProxyError as e:
+        if verbose:
+            # If it's an HTTP/HTTPS mismatch, provide more specific information
+            if "Your proxy appears to only use HTTP and not HTTPS" in str(e):
+               pass
+    except requests.exceptions.RequestException as e:
+        if verbose:
+            print(f"{Fore.YELLOW}[!] Request error with proxy {proxy}: {str(e)}{Style.RESET_ALL}")
+    except Exception as e:
+        if verbose:
+            print(f"{Fore.YELLOW}[!] Error: {str(e)}{Style.RESET_ALL}")
+    return None
+
+def bruteforce_login(url, username_file, password_file, proxy_file=None, verbose=False):
+    try:
+        # Validate input files first
+        if not username_file or not password_file:
+            print(f"{Fore.RED}[!] Both username and password wordlists are required{Style.RESET_ALL}")
+            return
+            
+        if not os.path.exists(username_file):
+            print(f"{Fore.RED}[!] Username wordlist not found: {username_file}{Style.RESET_ALL}")
+            return
+            
+        if not os.path.exists(password_file):
+            print(f"{Fore.RED}[!] Password wordlist not found: {password_file}{Style.RESET_ALL}")
+            return
+
+        # Parse the target URL
+        parsed_url = urlparse(url)
+        base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        path = parsed_url.path
+        
+        print(f"{Fore.WHITE}[*] Testing login form at {Fore.GREEN}{url}{Style.RESET_ALL}")
+        
+        # Check if the target URL is accessible
+        try:
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            if verbose:
+                print(f"{Fore.WHITE}[*] Successfully connected to target URL{Style.RESET_ALL}")
+                print(f"{Fore.WHITE}[*] Response status code: {Fore.GREEN}{response.status_code}{Style.RESET_ALL}")
+        except requests.exceptions.RequestException as e:
+            print(f"{Fore.RED}[!] Could not access {url}: {str(e)}{Style.RESET_ALL}")
+            return
+        
+        # Check if the target URL has a login form
+        soup = BeautifulSoup(response.text, 'html.parser')
+        form = soup.find('form')
+        if not form:
+            print(f"{Fore.YELLOW}[!] No login form found on {url}{Style.RESET_ALL}")
+            return
+        
+        if verbose:
+            print(f"{Fore.WHITE}[*] Found login form with action: {Fore.MAGENTA}{form.get('action', 'default')}{Style.RESET_ALL}")
+            print(f"{Fore.WHITE}[*] Form method: {Fore.MAGENTA}{form.get('method', 'POST')}{Style.RESET_ALL}")
+        
+        # Find all input fields in the login form
+        input_fields = form.find_all('input')
+        if not input_fields:
+            print(f"{Fore.YELLOW}[!] No input fields found in form on {url}{Style.RESET_ALL}")
+            return
+        
+        # Create a dictionary of input field names and values
+        input_data = {}
+        for field in input_fields:
+            name = field.get('name')
+            if name:
+                input_data[name] = field.get('value', '')
+                if verbose:
+                    print(f"{Fore.WHITE}[*] Found form field: {Fore.MAGENTA}{name} (type: {field.get('type', 'text')}){Style.RESET_ALL}")
+
+        # Create a dictionary of username and password input fields
+        username_field = None
+        password_field = None
+        
+        for name, value in input_data.items():
+            if name.lower() in [
+                'username', 'email', 'user', 'login', 'userid', 'user_id', 'user_name', 
+                'loginid', 'login_id', 'account', 'accountname', 'account_name', 'identity',
+                'uid', 'uname', 'nickname', 'handle', 'screen_name', 'member', 'memberid',
+                'member_id', 'customer', 'customerid', 'customer_id', 'auth', 'authentication',
+                'identifier', 'signin', 'sign_in', 'j_username', 'usr', 'usrname', 'username',
+                'user', 'userid', 'user_id', 'user_name', 'loginid', 'login_id', 'account',
+                'accountname', 'account_name', 'identity', 'uid', 'uname', 'nickname', 'handle',
+                'screen_name', 'member', 'memberid', 'member_id', 'customer', 'customerid',
+                'customer_id', 'auth', 'authentication', 'identifier', 'signin', 'sign_in',
+                'j_username', 'usr', 'usrname', 'username', 'user', 'userid', 'user_id',
+                'user_name', 'loginid', 'login_id', 'account', 'accountname', 'account_name', 'name']:
+                username_field = name
+            elif name.lower() in [
+                'password', 'pass', 'pwd', 'passwd', 'passphrase', 'passkey',
+                'password', 'pass', 'pwd', 'passwd', 'passphrase', 'secret', 'secretkey',
+                'secret_key', 'credentials', 'cred', 'userpass', 'user_pass', 'passcode',
+                'pass_code', 'pin', 'pincode', 'pin_code', 'p_word', 'pword', 'p_phrase',
+                'pphrase', 'authkey', 'auth_key', 'security_key', 'securitykey', 'j_password',
+                'pswd', 'pswrd', 'pw']:
+                password_field = name
+
+        if not username_field or not password_field:
+            print(f"{Fore.YELLOW}[!] Could not identify username/password fields on {url}{Style.RESET_ALL}")
+            return
+            
+        print(f"{Fore.WHITE}[*] Found login form fields - Username: {Fore.MAGENTA}{username_field}, {Fore.WHITE}Password: {Fore.MAGENTA}{password_field}{Style.RESET_ALL}")
+        
+        # Load wordlists
+        try:
+            usernames = password_wordlist(username_file)
+            passwords = password_wordlist(password_file)
+            
+            print(f"{Fore.WHITE}[*] Loaded {Fore.MAGENTA}{len(usernames)} usernames and {Fore.MAGENTA}{len(passwords)} passwords{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.RED}[!] Error loading wordlists: {str(e)}{Style.RESET_ALL}")
+            return
+
+        # Load and test proxies ONCE at the beginning
+        proxies = load_proxies(proxy_file, test=True, max_workers=50) if proxy_file else []
+        proxy_cycle = cycle(proxies) if proxies else None
+        
+        if proxies:
+            print(f"{Fore.WHITE}[*] Using {Fore.MAGENTA}{len(proxies)} working proxies{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.YELLOW}[!] No working proxies found or proxy file not provided. Running without proxies.{Style.RESET_ALL}")
+
+        success_indicators = {
+            'url_change': [
+                'my-account', 'dashboard', 'home', 'welcome', 'profile', 'account',
+                'admin', 'panel', 'control', 'console', 'manage',
+                'user', 'member', 'portal', 'secure', 'private',
+                'overview', 'summary', 'main', 'index.php', 'default.aspx',
+                'authenticated', 'session', 'loggedin', 'authorized'
+            ],
+            'content': [
+                'log out', 'sign out', 'logout', 'signout', 'sign off', 'logoff',
+                'welcome back', 'welcome,', 'hello,', 'hi,', 'greetings',
+                'my account', 'your account', 'your profile', 'account settings',
+                'dashboard', 'control panel', 'admin panel', 'user panel',
+                'session', 'you are logged in', 'authenticated', 'authorized',
+                'edit profile', 'change password', 'update details', 'account info',
+                'menu', 'navigation', 'sidebar', 'settings', 'preferences',
+                'two-factor', '2fa', 'security settings', 'activity log'
+            ],
+            'negative': [
+                'invalid', 'incorrect', 'failed', 'error', 'try again', 'wrong',
+                'authentication failed', 'login failed', 'access denied', 'denied',
+                'invalid username', 'invalid password', 'invalid credentials',
+                'incorrect username', 'incorrect password', 'wrong username', 'wrong password',
+                'captcha', 'recaptcha', 'verification', 'locked', 'suspended',
+                'too many attempts', 'rate limited', 'try later', 'timeout',
+                'does not exist', 'not recognized', 'not found', 'please try',
+                'sign in', 'log in', 'login form', 'remember me', 'forgot password'
+            ]
+        }
+        
+        # Get initial state
+        initial_url = response.url
+        if verbose:
+            print(f"{Fore.WHITE}[*] Initial URL: {Fore.GREEN}{initial_url}{Style.RESET_ALL}")
+        
+        # Set up progress tracking
+        total_combinations = len(usernames) * len(passwords)
+        print(f"{Fore.WHITE}[*] Starting bruteforce with {Fore.MAGENTA}{total_combinations} combinations{Style.RESET_ALL}")
+        
+        # Use ThreadPoolExecutor for faster performance
+        max_workers = min(50, os.cpu_count() * 5)  # Adjust based on your system
+        print(f"{Fore.WHITE}[*] Using {Fore.MAGENTA}{max_workers} concurrent workers{Style.RESET_ALL}")
+        
+        # Create a counter for progress tracking
+        completed = 0
+        found_credentials = False
+        print_lock = threading.Lock()
+        
+        # Try to import tqdm for progress bar
+        try:
+            from tqdm import tqdm
+            progress_bar = tqdm(total=total_combinations, desc="Testing combinations", 
+                               unit="combo", ncols=80, bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt}')
+            has_tqdm = True
+        except ImportError:
+            progress_bar = None
+            has_tqdm = False
+            print(f"{Fore.WHITE}[*] tqdm not installed, using simple progress updates{Style.RESET_ALL}")
+        
+        # Function to update progress
+        def update_progress():
+            nonlocal completed
+            completed += 1
+            if has_tqdm:
+                progress_bar.update(1)
+            elif completed % 10 == 0:
+                print(f"{Fore.WHITE}[*] Progress: {Fore.MAGENTA}{completed}/{total_combinations} ({(completed/total_combinations)*100:.1f}%){Style.RESET_ALL}", end='\r')
+        
+        # Function to process a single login attempt
+        def process_login(username, password):
+            nonlocal found_credentials, proxy_cycle
+            
+            # Skip if we already found credentials
+            if found_credentials:
+                return None
+                
+            # Create form data for this attempt
+            form_data = input_data.copy()
+            form_data[username_field] = username.strip()
+            form_data[password_field] = password.strip()
+            
+            # Get a random user agent
+            user_agent = get_random_user_agent()
+            
+            # Get a proxy if available - use the existing proxy_cycle
+            proxy = next(proxy_cycle) if proxy_cycle else None
+            
+            # Try login with proxy and user agent
+            result = try_login_task(username, password, url, form_data, initial_url, 
+                                   success_indicators, verbose, proxy, user_agent,
+                                   username_field, password_field)  # Pass the field names
+            
+            # Update progress
+            with print_lock:
+                update_progress()
+                
+            # Check if we found valid credentials or detected 2FA
+            if result:
+                if isinstance(result, tuple) and len(result) >= 3:
+                    if result[0] == "2FA_DETECTED":
+                        # 2FA was detected, handle specially
+                        _, username, password, final_url = result
+                        with print_lock:
+                            if has_tqdm:
+                                progress_bar.close()
+                            print(f"\n{Fore.YELLOW}[!] 2FA detected with credentials - Username: {Fore.MAGENTA}{username} {Fore.WHITE}Password: {Fore.MAGENTA}{password}{Style.RESET_ALL}")
+                            print(f"{Fore.WHITE}[+] Final URL: {Fore.GREEN}{final_url}{Style.RESET_ALL}")
+                            print(f"{Fore.YELLOW}[!] Bruteforcing stopped as 2FA cannot be automatically bypassed{Style.RESET_ALL}")
+                    else:
+                        # Normal successful login
+                        username, password, final_url = result
+                        with print_lock:
+                            if has_tqdm:
+                                progress_bar.close()
+                            print(f"\n{Fore.GREEN}[+] Success! {Fore.WHITE}Username: {Fore.MAGENTA}{username} {Fore.WHITE}Password: {Fore.MAGENTA}{password}{Style.RESET_ALL}")
+                            print(f"{Fore.WHITE}[+] Final URL: {Fore.GREEN}{final_url}{Style.RESET_ALL}")
+                
+                found_credentials = True
+                return result
+                
+            return None
+        
+        # Create all work items
+        work_items = []
+        for username in usernames:
+            for password in passwords:
+                work_items.append((username, password))
+        
+        # Process in batches
+        batch_size = 1000
+        for i in range(0, len(work_items), batch_size):
+            if found_credentials:
+                break
+                
+            batch = work_items[i:i+batch_size]
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(process_login, username, password): (username, password) for username, password in batch}
+                
+                for future in concurrent.futures.as_completed(futures):
+                    if found_credentials:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
+                        
+                    try:
+                        result = future.result()
+                        if result:
+                            # We found valid credentials or detected 2FA
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            break
+                    except Exception as e:
+                        if verbose:
+                            with print_lock:
+                                print(f"{Fore.RED}[!] Error: {str(e)}{Style.RESET_ALL}")
+        
+        # Close progress bar if it exists
+        if has_tqdm and progress_bar and not found_credentials:
+            progress_bar.close()
+        
+        if not found_credentials:
+            print(f"\n{Fore.YELLOW}[!] No valid credentials found after {completed} attempts{Style.RESET_ALL}")
+        
+    except Exception as e:
+        print(f"{Fore.RED}[!] Error during bruteforce attempt: {str(e)}{Style.RESET_ALL}")
+        if verbose:
+            import traceback
+            traceback.print_exc()
+
+# Update the argument handling
+if args.brute_user_pass:
+    if not args.username_wordlist:
+        print(f"{Fore.RED}[!] Error: Username wordlist is required. Use --username-wordlist to specify the file{Style.RESET_ALL}")
+    elif not args.password_wordlist:
+        print(f"{Fore.RED}[!] Error: Password wordlist is required. Use --password-wordlist to specify the file{Style.RESET_ALL}")
+    else:
+        bruteforce_login(args.brute_user_pass, args.username_wordlist, args.password_wordlist, 
+                            proxy_file=args.proxy_file, verbose=args.verbose)
+
+if args.nuclei:
+    def nuclei_scan(template: str, url: str) -> str:
+        print(f"Scanning {Fore.GREEN}{url} {Fore.WHITE}with {Fore.MAGENTA}{template}{Fore.WHITE}..\n")
+        nuclei_output = sub_output.subpro_scan(f"nuclei -u {url} -t {template} -silent -c 20 -j -o vulnerable.json")
+        return nuclei_output
+    
+    def nuclei_parser(nuclei_output: str) -> str:
+        try:
+            with open("vulnerable.json", "r") as f:
+                data = [x.strip() for x in f.readlines()]
+            
+            if not data:
+                print(f"{Fore.YELLOW}No vulnerabilities found.{Fore.WHITE}")
+                return
+                
+            results = []
+            for data_item in data:
+                try:
+                    json_result = json.loads(data_item)
+                    
+                    template_id = json_result.get("template-id", "N/A")
+                    matched_at = json_result.get("matched-at", "N/A")
+                    info = json_result.get("info", {})
+                    
+                    name = info.get("name", "Unknown Vulnerability")
+                    description = info.get("description", "No description available")
+                    severity = info.get("severity", "unknown")
+                    
+                    # Print findings
+                    print(f"{Fore.MAGENTA}Template ID: {Fore.GREEN}{template_id}")
+                    print(f"{Fore.MAGENTA}PoC: {Fore.GREEN}{matched_at}")
+                    print(f"{Fore.MAGENTA}Vulnerability: {Fore.GREEN}{name}")
+                    print(f"{Fore.MAGENTA}Description: {Fore.GREEN}{description}")
+                    print(f"{Fore.MAGENTA}Severity: {Fore.RED}{severity}")
+                    print("-" * 60)
+                    
+                    # Append to results
+                    results.append({
+                        "template_id": template_id,
+                        "matched_at": matched_at,
+                        "name": name,
+                        "description": description,
+                        "severity": severity
+                    })
+                except json.JSONDecodeError as e:
+                    print(f"{Fore.RED}Error parsing JSON result: {e}{Fore.WHITE}")
+                    continue
+                
+            return results
+        except FileNotFoundError:
+            print(f"{Fore.RED}Error: vulnerable.json file not found. Nuclei scan may have failed.{Fore.WHITE}")
+            return []
+        except Exception as e:
+            print(f"{Fore.RED}Error processing nuclei output: {str(e)}{Fore.WHITE}")
+            return []
+    
+    def main():
+        template = args.nuclei_template
+        url = args.nuclei
+        if not template or not url:
+            print(f"{Fore.RED}Error: Both template and URL are required for nuclei scanning.{Fore.WHITE}")
+            print(f"Usage: python spyhunt.py --nuclei [URL] --nuclei-template [TEMPLATE_PATH]")
+            return
+            
+        results = nuclei_scan(template, url)
+        nuclei_parser(results)
+    
+    if __name__ == "__main__":
+        main()
+
+if args.ssrfparams:
+
+    def domain_list(file):
+        try:
+            with open(args.ssrfparams, 'r') as f:
+                domains = (x.strip() for x in f.readlines())
+            return domains
+        except Exception as e:
+            print(e)
+            return []
+    
+    def check_params(domains):
+        payload_file_path = os.path.join(os.path.dirname(__file__), "payloads", "ssrf_params.txt")
+
+        try:
+            with open(payload_file_path, 'r') as f:
+                
+                payload_set = {line.strip() for line in f if line.strip()}
+            if not payload_set:
+                print(f"{Fore.YELLOW}Warning: Payload file '{payload_file_path}' is empty.{Style.RESET_ALL}", file=sys.stderr)
+                return ""
+        except FileNotFoundError:
+            print(f"{Fore.RED}Error: Payload file not found at '{payload_file_path}'{Style.RESET_ALL}", file=sys.stderr)
+            return "" 
+        except Exception as e:
+            print(f"{Fore.RED}Error loading payloads from '{payload_file_path}': {e}{Style.RESET_ALL}", file=sys.stderr)
+            return ""
+
+        ssrf_payloads_found = set()
+
+        for domain in domains: 
+            try:
+                domain_parsed = urlparse(domain) 
+                query_string = domain_parsed.query 
+
+                if not query_string: 
+                    continue
+
+                params_in_url = parse_qs(query_string)
+
+                for url_param_key in params_in_url.keys():
+                    if url_param_key in payload_set:
+                        ssrf_payloads_found.add(domain) 
+                        break
+            except Exception as e:
+                print(f"{Fore.YELLOW}Warning: Skipping URL '{domain}' due to error: {e}{Style.RESET_ALL}", file=sys.stderr)
+                continue 
+
+        return '\n'.join(sorted(list(ssrf_payloads_found)))
+
+    if __name__ == "__main__":
+        domains_to_check = domain_list(args.ssrfparams) 
+        if domains_to_check: 
+            found_params = check_params(domains_to_check)
+            if found_params:
+                 print(found_params)
+            else:
+                 print(f"{Fore.YELLOW}No URLs found with matching SSRF parameters.{Style.RESET_ALL}")
+
+
+DEFAULT_FTP_PORT = 21
+COMMON_FTP_CREDS = [
+    ("admin", "admin"),
+    ("ftp", "ftp"),
+    ("test", "test"),
+    ("anonymous", "anonymous"),
+    ("anonymous", "guest"),
+    ("admin", "password"),
+    ("administrator", "admin"),
+    ("administrator", "password"),
+    ("user", "user"),
+    ("user", "password"),
+    ("ftpuser", "ftpuser"),
+    ("guest", "guest"),
+    ("testuser", "testuser"),
+    ("root", "root"), # Less common for FTP, but worth a try
+    ("root", "password"), # Less common for FTP, but worth a try
+    ("test", "password"),
+    ("admin", "12345"),
+    ("ftp", "password"),
+    ("user", "12345"),
+    ("default", "default"),
+    ("login", "login"),
+    ("support", "support")
+]
+
+
+KNOWN_VULN_BANNERS = {
+    "vsFTPd 2.3.4": "Critical Backdoor (CVE-2011-2523). Shell listening on port 6200.",
+    "ProFTPD 1.3.3c": "Potential remote command execution vulnerabilities (e.g., CVE-2010-4221 if mod_site_misc is enabled).",
+    "ProFTPD 1.3.5": "Potential RCE via mod_copy (CVE-2015-3306). Verify if mod_copy is enabled.",
+    "Microsoft FTP Service": "Various vulnerabilities depending on version (e.g., IIS 7.5 DoS CVE-2010-3972). Check version and patch level.",
+    "Ability Server 2.34": "Directory Traversal vulnerability (CVE-2004-1633).",
+    "Serv-U FTP Server": "Versions < 15.1.7.259 may have multiple vulnerabilities (e.g., CVE-2019-12181 Directory Traversal). Verify version."
+}
+
+
+def check_banner_vulnerabilities(banner):
+    print(f"{Fore.CYAN}[*] Analyzing banner for known vulnerabilities...{Style.RESET_ALL}")
+    found_vuln = False
+    for vuln_sig, description in KNOWN_VULN_BANNERS.items():
+        if vuln_sig.lower() in banner.lower():
+            print(f"{Fore.RED}[!] Potential Vulnerability Found based on banner:{Style.RESET_ALL}")
+            print(f"    {Fore.YELLOW}Signature: {vuln_sig}{Style.RESET_ALL}")
+            print(f"    {Fore.YELLOW}Description: {description}{Style.RESET_ALL}")
+            found_vuln = True
+    
+    if not found_vuln:
+        print(f"{Fore.GREEN}[+] No specific known vulnerabilities matched in the banner from the internal list.{Style.RESET_ALL}")
+    
+    server_software_match = re.search(r"([\w.-]+(?:d|FTPd|Server))\s+([0-9]+\.[0-9]+(?:\.[0-9a-zA-Z.-]+)?)", banner, re.IGNORECASE)
+    if server_software_match:
+        software = server_software_match.group(1).strip()
+        version = server_software_match.group(2).strip()
+        print(f"{Fore.CYAN}    Identified Software: {Fore.WHITE}{software}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}    Identified Version: {Fore.WHITE}{version}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}    Suggestion: Manually verify {software} {version} against vulnerability databases (e.g., CVE Details, Exploit-DB).{Style.RESET_ALL}")
+    else:
+        print(f"{Fore.YELLOW}    Suggestion: Could not reliably parse software/version. Manually check the full banner against vulnerability databases.{Style.RESET_ALL}")
+
+
+def scan_ftp(target_host, target_port=DEFAULT_FTP_PORT, user_list_path=None, pass_list_path=None, proxy_list_path=None):
+    print(f"{Fore.MAGENTA}[+] Starting FTP Scan on {Fore.CYAN}{target_host}:{target_port}{Style.RESET_ALL}")
+
+    # --- Proxy List Setup ---
+    proxies = []
+    proxy_idx = 0
+    orig_socket = socket.socket
+    def set_proxy(proxy_url):
+        import re
+        socks.set_default_proxy(None)
+        socket.socket = orig_socket  # Reset first
+        if not proxy_url:
+            return
+        # If no protocol, default to socks5://
+        if not re.match(r'^(socks5|socks4|http)://', proxy_url.strip(), re.I):
+            proxy_url = f'socks5://{proxy_url.strip()}'
+        m = re.match(r'^(socks5|socks4|http)://([\w\.-]+):(\d+)$', proxy_url.strip(), re.I)
+        if not m:
+            print(f"{Fore.YELLOW}[!] Invalid proxy format: {proxy_url} (skipping proxy){Style.RESET_ALL}")
+            return
+        ptype, host, port = m.group(1).lower(), m.group(2), int(m.group(3))
+        proxy_type_map = {'socks5': socks.SOCKS5, 'socks4': socks.SOCKS4, 'http': socks.HTTP}
+        socks.set_default_proxy(proxy_type_map[ptype], host, port)
+        socket.socket = socks.socksocket
+        print(f"{Fore.CYAN}[*] Using proxy: {proxy_url}{Style.RESET_ALL}")
+
+    # Always filter for working proxies if a proxy list is provided
+    if proxy_list_path and os.path.exists(proxy_list_path):
+        print(f"{Fore.CYAN}[*] Testing proxies and using only working ones for FTP scan...{Style.RESET_ALL}")
+        proxies = load_proxies(proxy_list_path, test=True, max_workers=50)
+        if proxies:
+            print(f"{Fore.CYAN}[*] Loaded {len(proxies)} working proxies for FTP scan.{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.YELLOW}[!] No working proxies found in the list. Falling back to direct connection only.{Style.RESET_ALL}")
+            proxies = [None]
+    else:
+        proxies = [None]  # Direct connection only
+
+    ftp_connection = None
+    is_tls_connection = False
+    banner = ""
+
+    # Initial Connection Attempt
+    try:
+        print(f"{Fore.CYAN}[*] Connecting to {target_host}:{target_port} (Plain FTP)...{Style.RESET_ALL}")
+        ftp_plain = ftplib.FTP()
+        ftp_plain.connect(target_host, target_port, timeout=10)
+        banner = ftp_plain.getwelcome()
+        print(f"{Fore.GREEN}[+] Plain FTP Banner: {Fore.WHITE}{banner.strip()}{Style.RESET_ALL}")
+        check_banner_vulnerabilities(banner)
+        ftp_connection = ftp_plain
+    except ftplib.all_errors as e:
+        error_str = str(e).upper()
+        if "421" in str(e) and ("TLS" in error_str or "SSL" in error_str or "SECURITY MECHANISMS" in error_str or "MUST NEGOTIATE" in error_str or "PLEASE RECONNECT USING TLS" in error_str):
+            print(f"{Fore.YELLOW}[!] Server requires TLS (received: {str(e).strip()}). Attempting FTPS connection...{Style.RESET_ALL}")
+            if ftp_connection and ftp_connection.sock:
+                try:
+                    ftp_connection.quit()
+                except ftplib.all_errors:
+                    pass
+            ftp_connection = None
+
+            try:
+                ftp_tls_conn = ftplib.FTP_TLS() 
+                ftp_tls_conn.connect(target_host, target_port, timeout=10)
+                ftp_tls_conn.auth()
+                ftp_tls_conn.prot_p()
+                banner = ftp_tls_conn.getwelcome()
+                print(f"{Fore.GREEN}[+] FTPS Banner: {Fore.WHITE}{banner.strip()}{Style.RESET_ALL}")
+                check_banner_vulnerabilities(banner)
+                ftp_connection = ftp_tls_conn
+                is_tls_connection = True
+            except ftplib.all_errors as tls_e:
+                print(f"{Fore.RED}[-] FTPS connection failed: {tls_e}{Style.RESET_ALL}")
+                if 'ftp_tls_conn' in locals() and ftp_tls_conn.sock:
+                    try:
+                        ftp_tls_conn.quit()
+                    except ftplib.all_errors:
+                        pass
+                return # Exit if FTPS fails
+            except socket.error as sock_e:
+                print(f"{Fore.RED}[-] FTPS socket error: {sock_e}{Style.RESET_ALL}")
+                if 'ftp_tls_conn' in locals() and ftp_tls_conn.sock:
+                    try:
+                        ftp_tls_conn.quit()
+                    except ftplib.all_errors:
+                        pass
+                return # Exit
+        else:
+            print(f"{Fore.RED}[-] Error during initial plain FTP connection: {e}{Style.RESET_ALL}")
+            if ftp_connection and ftp_connection.sock:
+                try:
+                    ftp_connection.quit()
+                except ftplib.all_errors:
+                    pass
+            ftp_connection = None
+            return
+    except socket.error as sock_e_plain:
+        print(f"{Fore.RED}[-] Plain FTP socket error: {sock_e_plain}{Style.RESET_ALL}")
+        if ftp_connection and ftp_connection.sock: # Check if ftp_connection was assigned
+            try:
+                ftp_connection.quit()
+            except ftplib.all_errors:
+                pass
+        ftp_connection = None
+        return
+    
+    if not ftp_connection or not ftp_connection.sock:
+        print(f"{Fore.RED}[-] Failed to establish any initial FTP connection.{Style.RESET_ALL}")
+        return
+
+    # Close the initial connection used for banner grabbing, as subsequent sections make fresh connections.
+    if ftp_connection and ftp_connection.sock:
+        try:
+            ftp_connection.quit()
+        except ftplib.all_errors:
+            pass
+    # ftp_connection = None # Ensure subsequent sections make new connections
+
+    # --- Anonymous Login ---
+    print(f"{Fore.CYAN}[*] Attempting Anonymous login...{Style.RESET_ALL}")
+    anon_ftp_conn = None
+    tried_tls_anon = False
+    while True:
+        try:
+            if is_tls_connection or tried_tls_anon:
+                anon_ftp_conn = ftplib.FTP_TLS()
+            else:
+                anon_ftp_conn = ftplib.FTP()
+            anon_ftp_conn.connect(target_host, target_port, timeout=10)
+            if is_tls_connection or tried_tls_anon:
+                anon_ftp_conn.auth()
+                anon_ftp_conn.prot_p()
+            try:
+                anon_ftp_conn.login("anonymous", "anonymous@example.com")
+                print(f"{Fore.GREEN}[+] Anonymous login successful!{Style.RESET_ALL}")
+                try:
+                    print(f"{Fore.CYAN}    Attempting to list directory contents (NLST):{Style.RESET_ALL}")
+                    listings = anon_ftp_conn.nlst()
+                    if listings:
+                        for item in listings[:5]: 
+                            print(f"      - {item}")
+                        if len(listings) > 5:
+                            print(f"      ... and {len(listings)-5} more items.")
+                    else:
+                        print(f"{Fore.YELLOW}    Directory listing empty or not permitted.{Style.RESET_ALL}")
+                except ftplib.all_errors as e_ls:
+                    print(f"{Fore.YELLOW}    Could not list directory contents: {e_ls}{Style.RESET_ALL}")
+                break  # Success, exit loop
+            except ftplib.all_errors as e_anon_login:
+                error_str = str(e_anon_login).upper()
+                if (not tried_tls_anon and "421" in str(e_anon_login) and ("TLS" in error_str or "SSL" in error_str or "SECURITY MECHANISMS" in error_str or "MUST NEGOTIATE" in error_str or "PLEASE RECONNECT USING TLS" in error_str)):
+                    print(f"{Fore.YELLOW}[!] Anonymous login: Server requires TLS. Retrying with FTPS...{Style.RESET_ALL}")
+                    tried_tls_anon = True
+                    if anon_ftp_conn and hasattr(anon_ftp_conn, 'sock') and anon_ftp_conn.sock:
+                        try:
+                            anon_ftp_conn.quit()
+                        except ftplib.all_errors:
+                            pass
+                    continue  # Retry with FTPS
+                print(f"{Fore.RED}[-] Anonymous login failed: {e_anon_login}{Style.RESET_ALL}")
+                break
+        except ftplib.all_errors as e_anon_setup:
+            print(f"{Fore.RED}[-] Error during anonymous login setup: {e_anon_setup}{Style.RESET_ALL}")
+            break
+        except socket.error as e_sock_anon:
+            print(f"{Fore.RED}[-] Socket error during anonymous login setup: {e_sock_anon}{Style.RESET_ALL}")
+            break
+        finally:
+            if anon_ftp_conn and hasattr(anon_ftp_conn, 'sock') and anon_ftp_conn.sock:
+                try:
+                    anon_ftp_conn.quit()
+                except ftplib.all_errors:
+                    pass
+
+    # --- Credentialed Login ---
+    print(f"{Fore.CYAN}[*] Attempting default credentials login...{Style.RESET_ALL}")
+    credentials_to_try = list(COMMON_FTP_CREDS)
+
+    if user_list_path and pass_list_path:
+        try:
+            with open(user_list_path, 'r') as uf, open(pass_list_path, 'r') as pf:
+                users = [line.strip() for line in uf if line.strip()]
+                passwords = [line.strip() for line in pf if line.strip()]
+            if users and passwords:
+                 print(f"{Fore.CYAN}    Loaded {len(users)} usernames and {len(passwords)} passwords from files.{Style.RESET_ALL}")
+                 custom_creds = []
+                 for u_cred_file in users:
+                     for p_cred_file in passwords:
+                         custom_creds.append((u_cred_file, p_cred_file))
+                 if custom_creds:
+                     credentials_to_try.extend(custom_creds)
+                     print(f"{Fore.CYAN}    Added {len(custom_creds)} custom credential pairs to test.{Style.RESET_ALL}")
+        except FileNotFoundError:
+            print(f"{Fore.RED}[-] Error: User or password list file not found. Using default credentials only.{Style.RESET_ALL}")
+        except Exception as e_file:
+            print(f"{Fore.RED}[-] Error reading credential files: {e_file}. Using default credentials only.{Style.RESET_ALL}")
+    elif user_list_path or pass_list_path:
+        print(f"{Fore.YELLOW}[!] Warning: Both --ftp-userlist and --ftp-passlist must be provided to use custom credential lists. Using default credentials.{Style.RESET_ALL}")
+
+    found_creds = False
+    for user_cred, passwd_cred in credentials_to_try:
+        proxy_attempts = 0
+        while proxy_attempts < len(proxies):
+            cred_ftp_conn = None
+            tried_tls_cred = False
+            try:
+                set_proxy(proxies[proxy_idx])
+                if is_tls_connection or tried_tls_cred:
+                    cred_ftp_conn = ftplib.FTP_TLS()
+                else:
+                    cred_ftp_conn = ftplib.FTP()
+                cred_ftp_conn.connect(target_host, target_port, timeout=5)
+                if is_tls_connection or tried_tls_cred:
+                    cred_ftp_conn.auth()
+                    cred_ftp_conn.prot_p()
+                cred_ftp_conn.login(user_cred, passwd_cred)
+                print(f"{Fore.GREEN}[+] SUCCESSFUL LOGIN with {Fore.YELLOW}{user_cred}:{passwd_cred}{Style.RESET_ALL}")
+                found_creds = True
+                try:
+                    print(f"{Fore.CYAN}        Attempting to list directory contents (NLST):{Style.RESET_ALL}")
+                    listings = cred_ftp_conn.nlst()
+                    if listings:
+                        for item in listings[:5]:
+                            print(f"          - {item}")
+                        if len(listings) > 5:
+                            print(f"          ... and {len(listings)-5} more items.")
+                    else:
+                        print(f"{Fore.YELLOW}        Directory listing empty or not permitted.{Style.RESET_ALL}")
+                except ftplib.all_errors as e_ls_cred:
+                    print(f"{Fore.YELLOW}        Could not list directory contents: {e_ls_cred}{Style.RESET_ALL}")
+                break  # Success, exit proxy loop
+            except ftplib.error_perm:
+                break  # Permission error, don't retry with other proxies
+            except ftplib.all_errors as e_cred:
+                print(f"{Fore.RED}[-] FTP Error with {user_cred}:{passwd_cred} -> {e_cred}{Style.RESET_ALL}")
+                error_msg_cred = str(e_cred).lower()
+                if (isinstance(e_cred, (socket.error, ConnectionRefusedError, ftplib.error_temp)) or
+                    "timed out" in error_msg_cred or "connection refused" in error_msg_cred or
+                    "authentication not enabled" in error_msg_cred or "explicit tls is required" in error_msg_cred or "session is shutdown" in error_msg_cred):
+                    print(f"{Fore.YELLOW}[!] Proxy {proxy_idx+1}/{len(proxies)} failed, rotating proxy and retrying...{Style.RESET_ALL}")
+                    proxy_attempts += 1
+                    next_proxy()
+                    continue  # Try next proxy for same credential
+                break  # Other errors, don't retry
+            except socket.error as e_sock_cred:
+                print(f"{Fore.RED}[-] Socket error with {user_cred}:{passwd_cred} -> {e_sock_cred}{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}[!] Proxy {proxy_idx+1}/{len(proxies)} failed, rotating proxy and retrying...{Style.RESET_ALL}")
+                proxy_attempts += 1
+                next_proxy()
+                continue
+            finally:
+                if cred_ftp_conn and hasattr(cred_ftp_conn, 'sock') and cred_ftp_conn.sock:
+                    try:
+                        cred_ftp_conn.quit()
+                    except ftplib.all_errors:
+                        pass
+            break  # Only retry once per proxy per credential
+    # Reset socket after scan
+    socks.set_default_proxy(None)
+    socket.socket = orig_socket
+    if not found_creds and credentials_to_try: 
+        print(f"{Fore.YELLOW}[-] No default credentials worked.{Style.RESET_ALL}")
+    elif not credentials_to_try:
+        print(f"{Fore.YELLOW}[-] No credentials were available to test.{Style.RESET_ALL}")
+
+if __name__ == "__main__":
+
+    if args.ftp_scan:
+        target_parts = args.ftp_scan.split(':')
+        ftp_host = target_parts[0]
+        ftp_port = DEFAULT_FTP_PORT
+        if len(target_parts) > 1:
+            try:
+                ftp_port = int(target_parts[1])
+            except ValueError:
+                print(f"{Fore.RED}[-] Invalid port specified for FTP: {target_parts[1]}. Using default port {DEFAULT_FTP_PORT}.{Style.RESET_ALL}")
+        
+        scan_ftp(ftp_host, ftp_port, args.ftp_userlist, args.ftp_passlist, getattr(args, 'ftp_proxylist', None))
+
+    # Filter proxies if requested
+    if getattr(args, "ftp_proxylist", None) and getattr(args, "filter_proxies", False):
+        working = load_proxies(args.ftp_proxylist, test=True, max_workers=50)
+        out_path = "payloads/working_proxies.txt"
+        with open(out_path, "w") as f:
+            for proxy in working:
+                f.write(f"{proxy}\n")
+        print(f"{Fore.GREEN}Saved {len(working)} working proxies to {out_path}{Style.RESET_ALL}")
+        exit(0)
+
+action_taken = any(vars(args).values()) 
+if not action_taken and not args.update: 
+    action_args_present = False
+    for arg_name, arg_value in vars(args).items():
+        if arg_value and arg_name not in ['save', 'wordlist', 'threads', 'verbose', 'concurrency', 'shodan_api', 'proxy', 'proxy_file', 'heapdump', 'output_dir', 'token', 'save_ranges', 'forbidden_domains', 'ports', 'depth', 'extensions', 'exclude', 'update', 'shodan_api', 'ftp_scan', 'ftp_userlist', 'ftp_passlist']: # Add other non-action args here
+            action_taken = True
+            break
+
+if args.smb_scan:
+    print(f"{Fore.CYAN}[*] Starting SMB Scan on {Fore.CYAN}{args.smb_scan}{Style.RESET_ALL}\n")
+    target = args.smb_scan
+    smb_domain = args.domain or ""
+    smb_user = args.smb_user
+    smb_pass = args.smb_pass
+
+    def smb_scan(target, domain, smb_user, smb_pass):
+        try:
+            smb_conn = SMBConnection(target, target)
+            smb_conn.login(smb_user, smb_pass, domain)
+            print(f"[+] Connected to {target} as {smb_user}")
+            print("[+] Shares:")
+            for share in smb_conn.listShares():
+                print(f"  - {share['shi1_netname'][:-1]}")
+            smb_conn.logoff()
+            print(f"{Fore.GREEN}[+] SMB Scan completed successfully{Style.RESET_ALL}")
+        except SessionError as e:
+            print(f"{Fore.RED}[-] Error: {e}{Style.RESET_ALL}")
+
+    if __name__ == "__main__":
+        smb_scan(target, smb_domain, smb_user, smb_pass)
+
+def smb_auto_pentest(target, spray_userlist=None, spray_passlist=None, spray_password=None, smb_user=None, smb_pass=None, smb_domain=''):
+    from impacket.smbconnection import SMBConnection, SessionError
+    import time
+    print(f"{Fore.CYAN}[SMB Pentest] Target: {target}{Style.RESET_ALL}")
+
+    # 1. Anonymous login
+    print(f"\n{Fore.YELLOW}[1] Testing anonymous login...{Style.RESET_ALL}")
+    try:
+        conn = SMBConnection(target, target)
+        conn.login('', '', '')
+        try:
+            shares = conn.listShares()
+            print(f"{Fore.GREEN}[+] Anonymous login successful!{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}Shares:{Style.RESET_ALL}")
+            for share in shares:
+                print(f"  - {share['shi1_netname'][:-1]}")
+        except SessionError as e:
+            print(f"{Fore.YELLOW}[!] Anonymous session established, but share access denied{Style.RESET_ALL}")
+        conn.logoff()
+    except SessionError as e:
+        print(f"{Fore.RED}[-] Anonymous login failed: {e}{Style.RESET_ALL}")
+
+    # 2. Blank credentials (explicit -u "" -p "")
+    print(f"\n{Fore.YELLOW}[2] Testing blank credentials (-u '' -p '')...{Style.RESET_ALL}")
+    try:
+        conn = SMBConnection(target, target)
+        conn.login('', '', '')
+        try:
+            shares = conn.listShares()
+            print(f"{Fore.GREEN}[+] Blank credentials login successful!{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}Shares:{Style.RESET_ALL}")
+            for share in shares:
+                print(f"  - {share['shi1_netname'][:-1]}")
+        except SessionError as e:
+            print(f"{Fore.YELLOW}[!] Blank credentials session established, but share access denied{Style.RESET_ALL}")
+        conn.logoff()
+    except SessionError as e:
+        print(f"{Fore.RED}[-] Blank credentials login failed: {e}{Style.RESET_ALL}")
+
+    # 3. RID Brute Force for users (RID 500-550)
+    print(f"\n{Fore.YELLOW}[3] RID Brute Force (500-550)...{Style.RESET_ALL}")
+    try:
+        from impacket.dcerpc.v5 import transport, samr
+        rpctransport = transport.SMBTransport(target, 445, r'\samr', '', '', '', '', '')
+        dce = rpctransport.get_dce_rpc()
+        dce.connect()
+        dce.bind(samr.MSRPC_UUID_SAMR)
+        resp = samr.hSamrConnect(dce)
+        serverHandle = resp['ServerHandle']
+        domains = samr.hSamrEnumerateDomainsInSamServer(dce, serverHandle)['Buffer']['Buffer']
+        users_found = False
+        for dom in domains:
+            dom_name = dom['Name']
+            dom_sid = samr.hSamrLookupDomainInSamServer(dce, serverHandle, dom_name)['DomainId']
+            dom_handle = samr.hSamrOpenDomain(dce, serverHandle, samr.MAXIMUM_ALLOWED, dom_sid)['DomainHandle']
+            for rid in range(500, 551):
+                try:
+                    user = samr.hSamrLookupIdsInDomain(dce, dom_handle, [rid])
+                    print(f"  RID {rid}: {user['Names']['Names'][0]['Name']}")
+                    users_found = True
+                except Exception:
+                    continue
+        if not users_found:
+            print(f"{Fore.YELLOW}[!] No users found in RID range 500-550{Style.RESET_ALL}")
+        dce.disconnect()
+    except Exception as e:
+        print(f"{Fore.RED}[-] RID brute force failed: {e}{Style.RESET_ALL}")
+
+    # 4. Test specific credentials (if provided)
+    if smb_user and smb_pass:
+        print(f"\n{Fore.YELLOW}[4] Testing specific credentials ({smb_user})...{Style.RESET_ALL}")
+        try:
+            conn = SMBConnection(target, target)
+            conn.login(smb_user, smb_pass, smb_domain)
+            try:
+                shares = conn.listShares()
+                print(f"{Fore.GREEN}[+] Login successful: {smb_user}:{smb_pass}{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}Accessible Shares:{Style.RESET_ALL}")
+                for share in shares:
+                    share_name = share['shi1_netname'][:-1]
+                    print(f"  - {share_name}")
+                    # Test if we can list files in the share
+                    try:
+                        files = conn.listPath(share_name, '*')
+                        print(f"    {Fore.GREEN}✓ Can list files ({len(files)} items){Style.RESET_ALL}")
+                    except:
+                        print(f"    {Fore.YELLOW}! Cannot list files (access denied){Style.RESET_ALL}")
+            except SessionError as e:
+                print(f"{Fore.YELLOW}[!] Login successful but share access denied: {e}{Style.RESET_ALL}")
+            conn.logoff()
+        except SessionError as e:
+            print(f"{Fore.RED}[-] Login failed: {e}{Style.RESET_ALL}")
+
+    # 5. Password Spray (if user list and password/passlist provided)
+    if spray_userlist and (spray_passlist or spray_password):
+        print(f"\n{Fore.YELLOW}[5] Password Spraying...{Style.RESET_ALL}")
+        try:
+            with open(spray_userlist, 'r') as uf:
+                users = [u.strip() for u in uf if u.strip()]
+            
+            # Use password file if provided, otherwise use single password
+            if spray_passlist:
+                with open(spray_passlist, 'r') as pf:
+                    passwords = [p.strip() for p in pf if p.strip()]
+                print(f"{Fore.CYAN}[*] Using password list: {spray_passlist}{Style.RESET_ALL}")
+            elif spray_password:
+                passwords = [spray_password]
+                print(f"{Fore.CYAN}[*] Using single password: {spray_password}{Style.RESET_ALL}")
+            
+            for password in passwords:
+                print(f"\n{Fore.CYAN}[*] Trying password: {password}{Style.RESET_ALL}")
+                for user in users:
+                    try:
+                        conn = SMBConnection(target, target)
+                        conn.login(user, password, '')
+                        print(f"{Fore.GREEN}[+] Success: {user}:{password}{Style.RESET_ALL}")
+                        conn.logoff()
+                    except SessionError as e:
+                        if 'STATUS_LOGON_FAILURE' not in str(e):
+                            print(f"{Fore.YELLOW}[!] {user}:{password} - {e}{Style.RESET_ALL}")
+                        # else: fail silently for logon failure
+                    time.sleep(0.1)  # avoid lockout
+        except Exception as e:
+            print(f"{Fore.RED}[-] Password spraying failed: {e}{Style.RESET_ALL}")
+    else:
+        step_num = "5" if smb_user and smb_pass else "4"
+        print(f"\n{Fore.YELLOW}[{step_num}] Password Spraying skipped (no user list or password provided){Style.RESET_ALL}")
+
+if args.smb_auto:
+    smb_auto_pentest(
+        args.smb_target or args.smb_scan,
+        spray_userlist=args.spray_userlist,
+        spray_passlist=args.spray_passlist,
+        spray_password=args.spray_password,
+        smb_user=getattr(args, 'smb_user', None),
+        smb_pass=getattr(args, 'smb_pass', None),
+        smb_domain=getattr(args, 'smb_domain', '')
+    )
